@@ -8,6 +8,8 @@ on:
 jobs:
   build:
     runs-on: macos-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -41,3 +43,10 @@ jobs:
           name: SeryxTuner-unsigned-ipa
           path: build/SeryxTuner-unsigned.ipa
           if-no-files-found: error
+
+      - name: Publish IPA to public release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dev-latest
+          name: Latest dev build
+          files: build/SeryxTuner-unsigned.ipa
