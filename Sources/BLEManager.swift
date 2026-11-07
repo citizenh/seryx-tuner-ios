@@ -75,9 +75,16 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
 
     // MARK: Public high-level actions ------------------------------------------------
 
-    /// Initialise the ELM327 for raw 11-bit CAN @500k to header 7E0.
+    /// Initialise the ELM327 for 11-bit CAN @500k to header 7E0.
+    /// ATCAF1 keeps ISO-TP (ISO15765) auto-formatting ON so the adapter adds the
+    /// PCI length byte on TX and strips/reassembles it on RX — exactly what the
+    /// J2534 transport in ECUTuner does. With CAF0 the ECU sees a malformed
+    /// single-frame (PCI=0x01) and silently drops the 01 A0 … config request.
+    /// NOTE: no "ATZ". On ESP32-based dongles that emulate ELM327, ATZ is often a
+    /// real MCU reboot, which drops the BLE link the instant we connect. "ATE0"
+    /// (echo off) is a safe, non-disruptive first command.
     func initAdapter() {
-        enqueue(["ATZ", "ATE0", "ATL0", "ATS0", "ATH1", "ATSP6", "ATCAF0", "ATSH7E0"])
+        enqueue(["ATE0", "ATL0", "ATS0", "ATH1", "ATSP6", "ATCAF1", "ATSH7E0"])
     }
 
     /// Send one config byte: 01 A0 <feat> <val>
@@ -86,23 +93,30 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         enqueue([cmd])
     }
 
-    /// Apply the whole upshift config in one shot.
-    /// feat1=enable, feat2=cut cylinders (1..4), feat3=mode (A=1 / B=0)
+    /// Apply the whole upshift config in one shot, then read back to confirm.
+    /// feat1=enable, feat2=cut cylinders (1..4), feat3=mode (A=1 / B=0).
+    /// Mirrors ECUTuner's CfgApply, which ends the batch with a 01 A1 read.
+    /// The adapter is initialised once on connect, so we don't re-run ATZ here
+    /// (that reset would drop the header and slow every apply).
     func applyUpshift(enable: Bool, cut: Int, modeA: Bool) {
-        initAdapter()
         setFeature(1, enable ? 1 : 0)
         setFeature(2, max(1, min(4, cut)))
         setFeature(3, modeA ? 1 : 0)
-        status = "Config sent"
+        status = "Config sent — verifying…"
+        readBack()
     }
 
     /// Read back current config: 01 A1  → response parsed into lastReadback.
+    /// Positive reply is 41 <enable> <depth> <mode> …
     func readBack() {
-        initAdapter()
         enqueueWithResponse("01A1") { [weak self] resp in
             guard let self = self else { return }
             self.lastReadback = resp
             self.logLine("READBACK ← \(resp)")
+            // Positive read response starts with service echo 0x41 (0x01 + 0x40).
+            let clean = resp.replacingOccurrences(of: " ", with: "").uppercased()
+            self.status = clean.contains("41A1") || clean.hasPrefix("41") || clean.contains("7E8") && clean.contains("41")
+                ? "Applied ✓" : "No valid reply"
         }
     }
 
