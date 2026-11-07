@@ -1,0 +1,43 @@
+name: Build unsigned IPA
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build (unsigned archive)
+        run: |
+          xcodebuild \
+            -project SeryxTuner.xcodeproj \
+            -scheme SeryxTuner \
+            -configuration Release \
+            -sdk iphoneos \
+            -archivePath build/SeryxTuner.xcarchive \
+            archive \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
+
+      - name: Package unsigned .ipa
+        run: |
+          mkdir -p build/Payload
+          cp -R build/SeryxTuner.xcarchive/Products/Applications/SeryxTuner.app build/Payload/
+          cd build && zip -qr SeryxTuner-unsigned.ipa Payload
+          ls -la build || true
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SeryxTuner-unsigned-ipa
+          path: build/SeryxTuner-unsigned.ipa
+          if-no-files-found: error
