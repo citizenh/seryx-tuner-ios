@@ -170,32 +170,42 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         p.writeValue(data, for: c, type: type)
     }
 
-    /// mbito V2 request frame (21-byte header + raw UDS payload), all multi-byte fields LE.
-    /// Layout (from decompiled app): [0]request_type [1]request_nr [2]response_type
-    /// [3-6]sender(LE) [7-10]receiver(LE) [11-12]timeout [13-14]response_timeout
-    /// [15-16]response_len [17-18]request_len [19-20]actual_res_len [21+]command.
+    /// mbito request frame — VERIFIED against a live HCI capture of the mbito app.
+    /// = 4-byte outer BLE header + 21-byte UDS struct + raw UDS payload. All LE.
+    ///   outer:  [0]=0x40 "send request"  [1]=seq(0x01)  [2-3]=UDS-struct length (LE)
+    ///   struct: [0]req_type=0x00 [1]req_nr=0x00 [2]resp_type=0xFF
+    ///           [3-6]sender(LE) [7-10]receiver(LE) [11-12]timeout [13-14]resp_timeout
+    ///           [15-16]resp_len [17-18]req_len [19-20]actual_res_len [21+]command
     static func buildMbitoV2(senderId: UInt32, receiverId: UInt32, payload: [UInt8],
-                             requestType: UInt8 = 0x40, requestNr: UInt8 = 0, responseType: UInt8 = 0,
-                             timeout: UInt16 = 500, responseTimeout: UInt16 = 0, responseLen: UInt16 = 0) -> [UInt8] {
-        var f = [UInt8](repeating: 0, count: 21 + payload.count)
-        f[0] = requestType
-        f[1] = requestNr
-        f[2] = responseType
+                             timeout: UInt16 = 500, responseLen: UInt16 = 32, seq: UInt8 = 1) -> [UInt8] {
+        var u = [UInt8](repeating: 0, count: 21 + payload.count)
         func le32(_ v: UInt32, _ at: Int) {
-            f[at] = UInt8(v & 0xFF); f[at+1] = UInt8((v >> 8) & 0xFF)
-            f[at+2] = UInt8((v >> 16) & 0xFF); f[at+3] = UInt8((v >> 24) & 0xFF)
+            u[at] = UInt8(v & 0xFF); u[at+1] = UInt8((v >> 8) & 0xFF)
+            u[at+2] = UInt8((v >> 16) & 0xFF); u[at+3] = UInt8((v >> 24) & 0xFF)
         }
-        func le16(_ v: UInt16, _ at: Int) { f[at] = UInt8(v & 0xFF); f[at+1] = UInt8((v >> 8) & 0xFF) }
-        le32(senderId, 3)
-        le32(receiverId, 7)
-        le16(timeout, 11)
-        le16(responseTimeout, 13)
-        le16(responseLen, 15)
-        let plen = UInt16(payload.count)
-        le16(plen, 17)
-        le16(plen, 19)
-        for (i, b) in payload.enumerated() { f[21 + i] = b }
+        func le16(_ v: UInt16, _ at: Int) { u[at] = UInt8(v & 0xFF); u[at+1] = UInt8((v >> 8) & 0xFF) }
+        u[0] = 0x00                    // request_type
+        u[1] = 0x00                    // request_nr
+        u[2] = 0xFF                    // response_type
+        le32(senderId, 3)              // sender CAN id (LE)
+        le32(receiverId, 7)            // receiver CAN id (LE)
+        le16(timeout, 11)              // timeout ms
+        le16(0, 13)                    // response_timeout
+        le16(responseLen, 15)          // response_len (expected)
+        le16(UInt16(payload.count), 17)   // request_len
+        le16(UInt16(payload.count), 19)   // actual_res_len
+        for (i, b) in payload.enumerated() { u[21 + i] = b }
+        // outer BLE header: 40 <seq> <len LE>
+        var f: [UInt8] = [0x40, seq, UInt8(u.count & 0xFF), UInt8((u.count >> 8) & 0xFF)]
+        f.append(contentsOf: u)
         return f
+    }
+
+    /// Init handshake the mbito app runs on connect (observed in the capture):
+    /// 04 00 00 00 (session?) then 01 00 00 00 (get firmware version → "v1.xx").
+    func mbitoInit() {
+        writeMbito([0x04, 0x00, 0x00, 0x00])
+        writeMbito([0x01, 0x00, 0x00, 0x00])
     }
 
     static func hexToBytes(_ s: String) -> [UInt8] {
@@ -293,7 +303,12 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
                 if !isConnected {
                     isConnected = true
                     status = "Connected (mbito 0xFF01)"
-                    logLine("mbito dongle detected — subscribed to 0xFF01, no AT init")
+                    logLine("mbito dongle detected — subscribing to 0xFF01")
+                    // Replay the app's connect handshake once the CCCD write settles.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                        self?.logLine("mbito init handshake (04/01)")
+                        self?.mbitoInit()
+                    }
                 }
                 continue
             }

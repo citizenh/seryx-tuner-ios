@@ -130,7 +130,7 @@ struct ContentView: View {
                     .disabled(!ble.isConnected)
             }
             if ble.mbitoMode {
-                Text("mbito V2 frame (hex) → 0xFF01, little-endian:\n40 00 00 E0 07 00 00 E8 07 00 00 F4 01 00 00 00 00 04 00 04 00 01 A0 01 01\n[type nr rt | sender | receiver | tmo | rtmo | rlen | reqln | ares | 01 A0 feat val]")
+                Text("mbito frame → 0xFF01 (verified), LE:\n40 01 19 00 | 00 00 FF | E0 07 00 00 | E8 07 00 00 | F4 01 | 00 00 | 20 00 | 04 00 | 04 00 | 01 A0 01 01\n[outer 40/seq/len] [rt/nr/respt] sender receiver tmo rtmo rlen reqln ares  payload")
                     .font(.caption2).foregroundColor(.secondary)
             } else {
                 Text("SET = 01 A0 <feat> <val> · GET = 01 A1\nfeat1=enable  feat2=cut(1-4)  feat3=mode(A=1/B=0)")
