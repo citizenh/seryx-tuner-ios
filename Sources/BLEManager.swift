@@ -21,6 +21,14 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     private var writeChar: CBCharacteristic?
     private var notifyChar: CBCharacteristic?
 
+    // MARK: mbito dongle (custom BLE transport, reverse-engineered from lt.pixinn.mbito)
+    // Service 0x00FF, single characteristic 0xFF01 used for both TX (writeWithoutResponse)
+    // and RX (notify). Not ELM327 — we send the binary V2 request frame, not AT text.
+    @Published var mbitoMode = false
+    @Published var lastMbitoRx = ""
+    private let mbitoCharUUID = CBUUID(string: "FF01")
+    private var mbitoChar: CBCharacteristic?
+
     // Known ELM327 BLE service/characteristic families (adapter-dependent).
     // We don't hard-filter on scan; on connect we pick any char that is writable+notifiable.
     private let knownServiceUUIDs: [CBUUID] = [
@@ -121,10 +129,86 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     }
 
     /// Send an arbitrary raw command (debug box).
+    /// In mbito mode the box carries raw hex bytes (written to 0xFF01); otherwise ELM AT text.
     func sendRaw(_ cmd: String) {
+        if mbitoMode { sendMbitoHex(cmd); return }
         let c = cmd.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         guard !c.isEmpty else { return }
         enqueue([c])
+    }
+
+    // MARK: mbito send ---------------------------------------------------------------
+
+    /// Write raw bytes (given as a hex string) straight to the mbito 0xFF01 characteristic.
+    func sendMbitoHex(_ hex: String) {
+        let bytes = Self.hexToBytes(hex)
+        guard !bytes.isEmpty else { logLine("mbito: empty/invalid hex"); return }
+        writeMbito(bytes)
+    }
+
+    /// Build + send the reverse-engineered V2 request frame.
+    /// feat/val go in as the UDS payload 01 A0 <feat> <val>; set=0xA0, get would be 0xA1.
+    func sendMbitoFeature(_ feat: Int, _ val: Int) {
+        let payload: [UInt8] = [0x01, 0xA0, UInt8(feat & 0xFF), UInt8(val & 0xFF)]
+        let frame = Self.buildMbitoV2(senderId: 0x7E0, receiverId: 0x7E8, payload: payload)
+        writeMbito(frame)
+    }
+
+    /// Read back current config via the mbito dongle: UDS payload 01 A1.
+    func sendMbitoReadback() {
+        let frame = Self.buildMbitoV2(senderId: 0x7E0, receiverId: 0x7E8, payload: [0x01, 0xA1])
+        writeMbito(frame)
+    }
+
+    private func writeMbito(_ bytes: [UInt8]) {
+        guard let p = peripheral, let c = mbitoChar else { logLine("mbito: not connected to 0xFF01"); return }
+        let data = Data(bytes)
+        let type: CBCharacteristicWriteType =
+            c.properties.contains(.writeWithoutResponse) ? .withoutResponse : .withResponse
+        let shown = bytes.map { String(format: "%02X", $0) }.joined(separator: " ")
+        logLine("TX → \(shown)")
+        p.writeValue(data, for: c, type: type)
+    }
+
+    /// mbito V2 request frame (21-byte header + raw UDS payload), all multi-byte fields LE.
+    /// Layout (from decompiled app): [0]request_type [1]request_nr [2]response_type
+    /// [3-6]sender(LE) [7-10]receiver(LE) [11-12]timeout [13-14]response_timeout
+    /// [15-16]response_len [17-18]request_len [19-20]actual_res_len [21+]command.
+    static func buildMbitoV2(senderId: UInt32, receiverId: UInt32, payload: [UInt8],
+                             requestType: UInt8 = 0x40, requestNr: UInt8 = 0, responseType: UInt8 = 0,
+                             timeout: UInt16 = 500, responseTimeout: UInt16 = 0, responseLen: UInt16 = 0) -> [UInt8] {
+        var f = [UInt8](repeating: 0, count: 21 + payload.count)
+        f[0] = requestType
+        f[1] = requestNr
+        f[2] = responseType
+        func le32(_ v: UInt32, _ at: Int) {
+            f[at] = UInt8(v & 0xFF); f[at+1] = UInt8((v >> 8) & 0xFF)
+            f[at+2] = UInt8((v >> 16) & 0xFF); f[at+3] = UInt8((v >> 24) & 0xFF)
+        }
+        func le16(_ v: UInt16, _ at: Int) { f[at] = UInt8(v & 0xFF); f[at+1] = UInt8((v >> 8) & 0xFF) }
+        le32(senderId, 3)
+        le32(receiverId, 7)
+        le16(timeout, 11)
+        le16(responseTimeout, 13)
+        le16(responseLen, 15)
+        let plen = UInt16(payload.count)
+        le16(plen, 17)
+        le16(plen, 19)
+        for (i, b) in payload.enumerated() { f[21 + i] = b }
+        return f
+    }
+
+    static func hexToBytes(_ s: String) -> [UInt8] {
+        let clean = s.filter { $0.isHexDigit }
+        var out: [UInt8] = []
+        var i = clean.startIndex
+        while i < clean.endIndex {
+            let j = clean.index(i, offsetBy: 2, limitedBy: clean.endIndex) ?? clean.endIndex
+            if j == i { break }
+            if let b = UInt8(clean[i..<j], radix: 16) { out.append(b) }
+            i = j
+        }
+        return out
     }
 
     // MARK: Command queue plumbing ---------------------------------------------------
@@ -189,6 +273,7 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral p: CBPeripheral, error: Error?) {
         isConnected = false
         writeChar = nil; notifyChar = nil
+        mbitoChar = nil; mbitoMode = false
         status = "Disconnected"
     }
 
@@ -198,6 +283,20 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     }
     func peripheral(_ p: CBPeripheral, didDiscoverCharacteristicsFor s: CBService, error: Error?) {
         for c in s.characteristics ?? [] {
+            // mbito dongle: bind directly to 0xFF01 (TX + RX), subscribe, skip AT init.
+            if c.uuid == mbitoCharUUID {
+                mbitoChar = c
+                writeChar = c
+                notifyChar = c
+                mbitoMode = true
+                p.setNotifyValue(true, for: c)
+                if !isConnected {
+                    isConnected = true
+                    status = "Connected (mbito 0xFF01)"
+                    logLine("mbito dongle detected — subscribed to 0xFF01, no AT init")
+                }
+                continue
+            }
             if c.properties.contains(.notify) || c.properties.contains(.indicate) {
                 notifyChar = c
                 p.setNotifyValue(true, for: c)
@@ -206,7 +305,7 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
                 writeChar = c
             }
         }
-        if writeChar != nil && notifyChar != nil && !isConnected {
+        if !mbitoMode && writeChar != nil && notifyChar != nil && !isConnected {
             isConnected = true
             status = "Connected"
             logLine("Connected – initialising adapter")
@@ -214,7 +313,18 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         }
     }
     func peripheral(_ p: CBPeripheral, didUpdateValueFor c: CBCharacteristic, error: Error?) {
-        guard let d = c.value, let s = String(data: d, encoding: .ascii) else { return }
+        guard let d = c.value else { return }
+        if mbitoMode {
+            let hex = d.map { String(format: "%02X", $0) }.joined(separator: " ")
+            lastMbitoRx = hex
+            if let a = String(data: d, encoding: .ascii), a.contains("enabled") {
+                logLine("RX ← \(hex)   (dongle ready: \"enabled\")")
+            } else {
+                logLine("RX ← \(hex)")
+            }
+            return
+        }
+        guard let s = String(data: d, encoding: .ascii) else { return }
         rxBuffer += s
         if rxBuffer.contains(">") { finishCommand() }
     }

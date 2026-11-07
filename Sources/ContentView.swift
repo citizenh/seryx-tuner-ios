@@ -85,17 +85,32 @@ struct ContentView: View {
 
     // MARK: Actions
     private var actionSection: some View {
-        Section {
+        Section(footer: ble.mbitoMode
+                ? Text("mbito dongle: sends the V2 frame to 0xFF01 (01 A0 → 7E0). Tune request_type / timeout in the Raw box if no reply.")
+                : Text("")) {
             Button {
-                ble.applyUpshift(enable: enable, cut: cut, modeA: modeA)
+                if ble.mbitoMode {
+                    ble.sendMbitoFeature(1, enable ? 1 : 0)
+                    ble.sendMbitoFeature(2, max(1, min(4, cut)))
+                    ble.sendMbitoFeature(3, modeA ? 1 : 0)
+                    ble.sendMbitoReadback()
+                } else {
+                    ble.applyUpshift(enable: enable, cut: cut, modeA: modeA)
+                }
             } label: {
-                HStack { Spacer(); Text("APPLY TO ECU").bold(); Spacer() }
+                HStack { Spacer(); Text(ble.mbitoMode ? "APPLY (mbito)" : "APPLY TO ECU").bold(); Spacer() }
             }
             .listRowBackground(orange)
             .foregroundColor(.black)
 
-            Button("Read back from ECU") { ble.readBack() }
-            if !ble.lastReadback.isEmpty {
+            Button("Read back from ECU") {
+                if ble.mbitoMode { ble.sendMbitoReadback() } else { ble.readBack() }
+            }
+            if ble.mbitoMode, !ble.lastMbitoRx.isEmpty {
+                Text("RX: \(ble.lastMbitoRx)")
+                    .font(.system(.footnote, design: .monospaced))
+                    .foregroundColor(.secondary)
+            } else if !ble.lastReadback.isEmpty {
                 Text("ECU: \(ble.lastReadback)")
                     .font(.system(.footnote, design: .monospaced))
                     .foregroundColor(.secondary)
@@ -114,8 +129,13 @@ struct ContentView: View {
                 Button("Send") { ble.sendRaw(rawCmd); rawCmd = "" }
                     .disabled(!ble.isConnected)
             }
-            Text("SET = 01 A0 <feat> <val> · GET = 01 A1\nfeat1=enable  feat2=cut(1-4)  feat3=mode(A=1/B=0)")
-                .font(.caption2).foregroundColor(.secondary)
+            if ble.mbitoMode {
+                Text("mbito V2 frame (hex) → 0xFF01, little-endian:\n40 00 00 E0 07 00 00 E8 07 00 00 F4 01 00 00 00 00 04 00 04 00 01 A0 01 01\n[type nr rt | sender | receiver | tmo | rtmo | rlen | reqln | ares | 01 A0 feat val]")
+                    .font(.caption2).foregroundColor(.secondary)
+            } else {
+                Text("SET = 01 A0 <feat> <val> · GET = 01 A1\nfeat1=enable  feat2=cut(1-4)  feat3=mode(A=1/B=0)")
+                    .font(.caption2).foregroundColor(.secondary)
+            }
         }
     }
 
