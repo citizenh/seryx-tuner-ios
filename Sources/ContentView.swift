@@ -95,6 +95,7 @@ struct ContentView: View {
         TabView {
             DongleView().tabItem { Label("Dongle", systemImage: "dot.radiowaves.left.and.right") }
             TuneView().tabItem { Label("Tune", systemImage: "flame.fill") }
+            LightsView().tabItem { Label("Lights", systemImage: "lightbulb.fill") }
         }
         .tint(T.amber)
         .preferredColorScheme(.dark)
@@ -335,6 +336,101 @@ struct TuneView: View {
             Button("Clear log") { ble.clearLog() }.font(.system(size: 13)).foregroundColor(T.amber)
         }
         .cardStyle()
+    }
+}
+
+// MARK: - Page 3: Lights
+struct LightsView: View {
+    @EnvironmentObject var ble: BLEManager
+    private let cols = [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)]
+
+    var body: some View {
+        ZStack {
+            T.bg.ignoresSafeArea()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 13) {
+                    AppHeader()
+                    if ble.isConnected {
+                        header
+                        grid
+                        if ble.activeLightStyle != nil { stopButton }
+                        didRow
+                        Text("Drives your front headlamps over UDS zone control. If nothing flashes, try another DID below. Running effects stop when you disconnect.")
+                            .font(.system(size: 12)).foregroundColor(T.grey)
+                    } else {
+                        notConnected
+                    }
+                }
+                .padding(.horizontal, 16).padding(.bottom, 24)
+            }
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "lightbulb.fill").font(.system(size: 20)).foregroundColor(T.amber)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Headlight effects").font(.system(size: 16, weight: .medium)).foregroundColor(.white)
+                Text(ble.activeLightStyle == nil ? "Tap a style to run it" : "Running — tap again or Stop")
+                    .font(.system(size: 12)).foregroundColor(T.grey)
+            }
+            Spacer()
+        }
+    }
+
+    private var grid: some View {
+        LazyVGrid(columns: cols, spacing: 12) {
+            ForEach(BLEManager.lightStyles) { style in
+                let on = ble.activeLightStyle == style.id
+                Button { ble.toggleLights(style) } label: {
+                    VStack(spacing: 8) {
+                        Image(systemName: style.icon).font(.system(size: 24)).foregroundColor(on ? T.bg : T.amber)
+                        Text(style.name).font(.system(size: 14, weight: .medium)).foregroundColor(on ? T.bg : .white)
+                    }
+                    .frame(maxWidth: .infinity).padding(.vertical, 20)
+                    .background(on ? T.amber : T.card)
+                    .overlay(RoundedRectangle(cornerRadius: 14).stroke(on ? T.amber : T.cardBorder, lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: 14))
+                }
+            }
+        }
+    }
+
+    private var stopButton: some View {
+        Button { ble.stopLights() } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "stop.fill").font(.system(size: 16))
+                Text("Stop").font(.system(size: 16, weight: .bold))
+            }
+            .frame(maxWidth: .infinity).padding(.vertical, 14)
+            .background(T.red).foregroundColor(.white).clipShape(RoundedRectangle(cornerRadius: 12))
+        }
+    }
+
+    private var didRow: some View {
+        HStack {
+            Text("Headlamp DID").font(.system(size: 13)).foregroundColor(T.grey)
+            Spacer()
+            ForEach([UInt16(0x0008), 0xD008, 0x0011], id: \.self) { did in
+                let on = ble.lightDID == did
+                Text(String(format: "%04X", did))
+                    .font(.system(size: 13, design: .monospaced))
+                    .padding(.horizontal, 10).padding(.vertical, 6)
+                    .background(on ? T.amber : T.bg).foregroundColor(on ? T.bg : T.greyLt)
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(on ? T.amber : T.line, lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .onTapGesture { ble.lightDID = did }
+            }
+        }
+    }
+
+    private var notConnected: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "lightbulb.slash").font(.system(size: 34)).foregroundColor(T.grey)
+            Text("Connect your dongle").font(.system(size: 16, weight: .medium)).foregroundColor(.white)
+            Text("Open the Dongle tab to connect first.").font(.system(size: 13)).foregroundColor(T.grey)
+        }
+        .frame(maxWidth: .infinity).padding(.vertical, 60)
     }
 }
 

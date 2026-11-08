@@ -3,6 +3,17 @@ import CoreBluetooth
 
 enum ApplyState { case idle, pending, applying, verified, mismatch, noReply }
 
+/// A headlight animation = a looping sequence of per-lamp 6-zone bitmasks.
+/// Each step sends a UDS 2F InputOutputControl frame to each front headlamp.
+struct LightStyle: Identifiable {
+    let id: String
+    let name: String
+    let icon: String
+    let periodMs: Int
+    let random: Bool
+    let steps: [(UInt8, UInt8)]   // (left-lamp zone mask, right-lamp zone mask), 6 bits
+}
+
 /// Talks to a Bluetooth-LE ELM327 OBD adapter and sends the Seryx custom
 /// config frames (CAN id 0x7E0, payload `01 A0 <feat> <val>` for SET, `01 A1` for GET).
 /// The ECU firmware handler writes the arming magic + checksum itself, so the app
@@ -39,6 +50,34 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     private var awaitingVerify = false
     private var verifyToken = 0
     private let targetName = "V2502615C3"   // the mbito dongle always advertises this
+
+    // MARK: Headlight animations (UDS 2F zone control to front headlamps)
+    @Published var activeLightStyle: String? = nil
+    @Published var lightDID: UInt16 = 0x0008     // swap to 0xD008 / 0x0011 if lamps don't respond
+    // W205 front headlamps (HLI_FL212 / HLI_FR212): request/response CAN ids.
+    private let hlFL: (tx: UInt32, rx: UInt32) = (0x76A, 0x4AD)
+    private let hlFR: (tx: UInt32, rx: UInt32) = (0x772, 0x4AE)
+    private var lightTimer: Timer?
+    private var lightStep = 0
+    private var currentStyle: LightStyle?
+
+    static let lightStyles: [LightStyle] = [
+        LightStyle(id: "strobe", name: "Strobe", icon: "bolt.fill", periodMs: 60, random: false,
+                   steps: [(0x3F,0x3F),(0x00,0x00)]),
+        LightStyle(id: "knight", name: "Knight Rider", icon: "arrow.left.and.right", periodMs: 70, random: false,
+                   steps: [(0x01,0),(0x02,0),(0x04,0),(0x08,0),(0x10,0),(0x20,0),
+                           (0,0x01),(0,0x02),(0,0x04),(0,0x08),(0,0x10),(0,0x20),
+                           (0,0x10),(0,0x08),(0,0x04),(0,0x02),(0,0x01),
+                           (0x20,0),(0x10,0),(0x08,0),(0x04,0),(0x02,0)]),
+        LightStyle(id: "wave", name: "Wave", icon: "waveform", periodMs: 80, random: false,
+                   steps: [(0x01,0x01),(0x03,0x03),(0x07,0x07),(0x0F,0x0F),(0x1F,0x1F),(0x3F,0x3F),
+                           (0x1F,0x1F),(0x0F,0x0F),(0x07,0x07),(0x03,0x03),(0x01,0x01),(0,0)]),
+        LightStyle(id: "police", name: "Police", icon: "car.fill", periodMs: 55, random: false,
+                   steps: [(0x3F,0),(0,0x3F),(0x3F,0),(0,0x3F),(0,0),(0x3F,0x3F),(0,0),(0x3F,0x3F)]),
+        LightStyle(id: "pulse", name: "Pulse", icon: "dot.radiowaves.left.and.right", periodMs: 320, random: false,
+                   steps: [(0x3F,0x3F),(0x00,0x00)]),
+        LightStyle(id: "sparkle", name: "Sparkle", icon: "sparkles", periodMs: 90, random: true, steps: [])
+    ]
 
     // Known ELM327 BLE service/characteristic families (adapter-dependent).
     // We don't hard-filter on scan; on connect we pick any char that is writable+notifiable.
@@ -182,6 +221,57 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     func sendMbitoReadback() {
         let frame = Self.buildMbitoV2(senderId: 0x7E0, receiverId: 0x7E8, payload: [0x01, 0xA1])
         writeMbito(frame)
+    }
+
+    // MARK: Headlight animation engine ------------------------------------------------
+
+    func toggleLights(_ style: LightStyle) {
+        if activeLightStyle == style.id { stopLights() } else { startLights(style) }
+    }
+
+    func startLights(_ style: LightStyle) {
+        stopLights()
+        guard mbitoChar != nil else { logLine("lights: not connected"); return }
+        currentStyle = style
+        activeLightStyle = style.id
+        lightStep = 0
+        // Enter extended diagnostic session on both headlamps once.
+        sendUDS(hlFL, [0x10, 0x03]); sendUDS(hlFR, [0x10, 0x03])
+        logLine("lights: \(style.name) start (DID \(String(format: "%04X", lightDID)))")
+        lightTimer = Timer.scheduledTimer(withTimeInterval: Double(style.periodMs) / 1000.0, repeats: true) { [weak self] _ in
+            self?.lightTick()
+        }
+    }
+
+    func stopLights() {
+        lightTimer?.invalidate(); lightTimer = nil
+        currentStyle = nil
+        activeLightStyle = nil
+        // All zones off on both lamps.
+        if mbitoChar != nil { sendZone(hlFL, 0x00); sendZone(hlFR, 0x00) }
+    }
+
+    private func lightTick() {
+        guard let s = currentStyle else { return }
+        let l: UInt8, r: UInt8
+        if s.random {
+            l = UInt8.random(in: 0...0x3F); r = UInt8.random(in: 0...0x3F)
+        } else {
+            let step = s.steps[lightStep % s.steps.count]
+            l = step.0; r = step.1
+        }
+        sendZone(hlFL, l); sendZone(hlFR, r)
+        lightStep += 1
+    }
+
+    /// UDS InputOutputControlByIdentifier zone frame: 2F <DID> 03 <zoneMask> 3F 00
+    private func sendZone(_ lamp: (tx: UInt32, rx: UInt32), _ mask: UInt8) {
+        sendUDS(lamp, [0x2F, UInt8(lightDID >> 8), UInt8(lightDID & 0xFF), 0x03, mask, 0x3F, 0x00])
+    }
+
+    private func sendUDS(_ lamp: (tx: UInt32, rx: UInt32), _ uds: [UInt8]) {
+        guard mbitoChar != nil else { return }
+        writeMbito(Self.buildMbitoV2(senderId: lamp.tx, receiverId: lamp.rx, payload: uds))
     }
 
     // MARK: High-level apply/verify (drives the UI feedback) ------------------------
@@ -373,6 +463,7 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral p: CBPeripheral, error: Error?) {
         isConnected = false
         writeChar = nil; notifyChar = nil
+        lightTimer?.invalidate(); lightTimer = nil; currentStyle = nil; activeLightStyle = nil
         mbitoChar = nil; mbitoMode = false
         connectedName = ""; applyState = .idle; awaitingVerify = false
         status = "Disconnected"
