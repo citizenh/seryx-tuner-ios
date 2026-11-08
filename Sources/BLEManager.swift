@@ -80,8 +80,10 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         discovered.removeAll()
         isScanning = true
         status = "Scanning…"
-        // nil = all peripherals; many ELM327 clones don't advertise their service UUID
-        central.scanForPeripherals(withServices: nil, options: nil)
+        // Match mbito: filter by the dongle's advertised service 0x00FF, so only
+        // compatible dongles appear (not every BLE device around). iOS only returns
+        // peripherals advertising this service UUID.
+        central.scanForPeripherals(withServices: [CBUUID(string: "00FF")], options: nil)
         DispatchQueue.main.asyncAfter(deadline: .now() + 12) { [weak self] in self?.stopScan() }
     }
     func stopScan() {

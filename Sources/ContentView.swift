@@ -22,8 +22,9 @@ private enum T {
     static let green = Color(hex: 0x3DDC73)
     static let red = Color(hex: 0xFF6B5E)
 }
+private let targetDongle = "V2502615C3"
 
-// MARK: - ECUTuner "ET" logo, redrawn as vector
+// MARK: - ECUTuner "ET" logo
 struct ECULogo: View {
     var size: CGFloat = 32
     var body: some View {
@@ -37,13 +38,11 @@ struct ECULogo: View {
                 p.closeSubpath()
             }.fill(T.amber)
             Path { p in
-                // E
                 for (i, pt) in [(26,38),(72,38),(72,54),(44,54),(44,72),(68,72),(68,88),(44,88),(44,106),(72,106),(72,122),(26,122)].enumerated() {
                     let c = CGPoint(x: CGFloat(pt.0)*s, y: CGFloat(pt.1)*s)
                     if i == 0 { p.move(to: c) } else { p.addLine(to: c) }
                 }
                 p.closeSubpath()
-                // T
                 for (i, pt) in [(78,38),(132,38),(132,54),(114,54),(114,122),(96,122),(96,54),(78,54)].enumerated() {
                     let c = CGPoint(x: CGFloat(pt.0)*s, y: CGFloat(pt.1)*s)
                     if i == 0 { p.move(to: c) } else { p.addLine(to: c) }
@@ -57,33 +56,142 @@ struct ECULogo: View {
     }
 }
 
-// MARK: - Segmented picker (ECUTuner look)
+struct AppHeader: View {
+    var body: some View {
+        HStack(spacing: 11) {
+            ECULogo(size: 32)
+            Text("ECU TUNER").font(.system(size: 23, weight: .heavy)).foregroundColor(T.amber)
+            Spacer()
+        }
+        .padding(.top, 8).padding(.bottom, 4)
+    }
+}
+
+// MARK: - Segmented picker
 struct SegPicker: View {
     let options: [(tag: Int, label: String)]
     @Binding var selection: Int
-    var onChange: (() -> Void)? = nil
     var body: some View {
         HStack(spacing: 6) {
             ForEach(options, id: \.tag) { opt in
                 let on = selection == opt.tag
                 Text(opt.label)
                     .font(.system(size: opt.label.count > 2 ? 13 : 15, weight: on ? .semibold : .regular))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 9)
+                    .frame(maxWidth: .infinity).padding(.vertical, 9)
                     .background(on ? (opt.label.count > 2 ? Color(hex: 0x303134) : T.amber) : T.bg)
                     .foregroundColor(on ? (opt.label.count > 2 ? .white : T.bg) : T.greyLt)
                     .overlay(RoundedRectangle(cornerRadius: 9).stroke(on ? T.amber : T.line, lineWidth: 1))
                     .clipShape(RoundedRectangle(cornerRadius: 9))
                     .contentShape(Rectangle())
-                    .onTapGesture { selection = opt.tag; onChange?() }
+                    .onTapGesture { selection = opt.tag }
             }
         }
     }
 }
 
+// MARK: - Root (2 tabs)
 struct ContentView: View {
-    @EnvironmentObject var ble: BLEManager
+    var body: some View {
+        TabView {
+            DongleView().tabItem { Label("Dongle", systemImage: "dot.radiowaves.left.and.right") }
+            TuneView().tabItem { Label("Tune", systemImage: "flame.fill") }
+        }
+        .tint(T.amber)
+        .preferredColorScheme(.dark)
+    }
+}
 
+// MARK: - Page 1: Dongle selection
+struct DongleView: View {
+    @EnvironmentObject var ble: BLEManager
+    var body: some View {
+        ZStack {
+            T.bg.ignoresSafeArea()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 13) {
+                    AppHeader()
+                    statusCard
+                    scanButton
+                    if !ble.discovered.isEmpty { deviceList }
+                }
+                .padding(.horizontal, 16).padding(.bottom, 24)
+            }
+        }
+    }
+
+    private var statusCard: some View {
+        HStack(spacing: 12) {
+            Image(systemName: ble.isConnected ? "checkmark.seal.fill" : "antenna.radiowaves.left.and.right")
+                .font(.system(size: 26)).foregroundColor(ble.isConnected ? T.green : T.amber)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(ble.isConnected ? (ble.connectedName.isEmpty ? targetDongle : ble.connectedName) : (ble.isScanning ? "Scanning…" : "Not connected"))
+                    .font(.system(size: 16, weight: .medium)).foregroundColor(.white)
+                Text(ble.isConnected ? "ESP32 dongle · ready" : ble.status)
+                    .font(.system(size: 12)).foregroundColor(T.grey)
+            }
+            Spacer()
+            if ble.isConnected {
+                Button { ble.disconnect() } label: {
+                    Text("Disconnect").font(.system(size: 13)).foregroundColor(T.red)
+                }
+            }
+        }
+        .cardStyle()
+    }
+
+    private var scanButton: some View {
+        Button { ble.startScan() } label: {
+            HStack(spacing: 8) {
+                Image(systemName: ble.isScanning ? "arrow.triangle.2.circlepath" : "magnifyingglass")
+                Text(ble.isScanning ? "Scanning…" : "Scan for dongles").font(.system(size: 15, weight: .medium))
+            }
+            .frame(maxWidth: .infinity).padding(.vertical, 13)
+            .foregroundColor(T.bg).background(T.amber)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+        }
+    }
+
+    private var deviceList: some View {
+        VStack(spacing: 0) {
+            ForEach(sortedDevices, id: \.identifier) { p in
+                let name = p.name ?? "Unknown adapter"
+                let isTarget = (p.name == targetDongle)
+                let isConn = ble.isConnected && ble.connectedName == name
+                Button { ble.connect(p) } label: {
+                    HStack(spacing: 11) {
+                        Image(systemName: "dot.radiowaves.left.and.right")
+                            .font(.system(size: 16)).foregroundColor(isTarget ? T.amber : T.grey)
+                        Text(name).font(.system(size: 15)).foregroundColor(isTarget ? .white : T.greyLt)
+                        if isTarget {
+                            Text("Your dongle").font(.system(size: 11, weight: .medium))
+                                .padding(.horizontal, 7).padding(.vertical, 2)
+                                .background(T.amber.opacity(0.18)).foregroundColor(T.amber)
+                                .clipShape(Capsule())
+                        }
+                        Spacer()
+                        if isConn { Image(systemName: "checkmark").font(.system(size: 14)).foregroundColor(T.green) }
+                    }
+                    .padding(.vertical, 12)
+                }
+                if p.identifier != sortedDevices.last?.identifier {
+                    Rectangle().fill(T.line).frame(height: 0.5)
+                }
+            }
+        }
+        .padding(.horizontal, 15)
+        .background(T.card)
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(T.cardBorder, lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 14))
+    }
+
+    private var sortedDevices: [CBPeripheral] {
+        ble.discovered.sorted { a, _ in a.name == targetDongle }
+    }
+}
+
+// MARK: - Page 2: Tune
+struct TuneView: View {
+    @EnvironmentObject var ble: BLEManager
     @State private var enable = true
     @State private var cut = 1
     @State private var modeA = false
@@ -95,66 +203,37 @@ struct ContentView: View {
             T.bg.ignoresSafeArea()
             ScrollView {
                 VStack(alignment: .leading, spacing: 13) {
-                    header
-                    adapterCard
+                    AppHeader()
                     if ble.isConnected {
                         exhaustCard
                         statusStrip
                         applyButton
                         readButton
+                        advancedRow
+                        if showAdvanced { advancedBody }
+                    } else {
+                        notConnected
                     }
-                    advancedRow
-                    if showAdvanced { advancedBody }
                 }
-                .padding(.horizontal, 16)
-                .padding(.bottom, 24)
+                .padding(.horizontal, 16).padding(.bottom, 24)
             }
         }
-        .preferredColorScheme(.dark)
-        .onChange(of: cut) { _ in markDirty() }
-        .onChange(of: modeA) { _ in markDirty() }
-        .onChange(of: enable) { _ in markDirty() }
+        .onChange(of: cut) { _ in ble.markPending() }
+        .onChange(of: modeA) { _ in ble.markPending() }
+        .onChange(of: enable) { _ in ble.markPending() }
     }
 
-    private func markDirty() { if ble.isConnected { ble.markPending() } }
-
-    // MARK: Header
-    private var header: some View {
-        HStack(spacing: 11) {
-            ECULogo(size: 32)
-            Text("ECU TUNER")
-                .font(.system(size: 23, weight: .heavy))
-                .foregroundColor(T.amber)
-            Spacer()
+    private var notConnected: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "antenna.radiowaves.left.and.right.slash")
+                .font(.system(size: 34)).foregroundColor(T.grey)
+            Text("Connect your dongle").font(.system(size: 16, weight: .medium)).foregroundColor(.white)
+            Text("Open the Dongle tab to connect to \(targetDongle).")
+                .font(.system(size: 13)).foregroundColor(T.grey).multilineTextAlignment(.center)
         }
-        .padding(.top, 8)
-        .padding(.bottom, 4)
+        .frame(maxWidth: .infinity).padding(.vertical, 60)
     }
 
-    // MARK: Adapter
-    private var adapterCard: some View {
-        HStack(spacing: 12) {
-            Image(systemName: ble.isConnected ? "bolt.horizontal.circle.fill" : "antenna.radiowaves.left.and.right")
-                .font(.system(size: 24))
-                .foregroundColor(T.amber)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(ble.isConnected ? (ble.connectedName.isEmpty ? "V2502615C3" : ble.connectedName) : (ble.isScanning ? "Scanning…" : "No dongle"))
-                    .font(.system(size: 15, weight: .medium)).foregroundColor(.white)
-                Text(ble.isConnected ? "ESP32 dongle · auto-connected" : ble.status)
-                    .font(.system(size: 12)).foregroundColor(T.grey)
-            }
-            Spacer()
-            if ble.isConnected {
-                Circle().fill(T.green).frame(width: 9, height: 9)
-            } else {
-                Button(ble.isScanning ? "…" : "Scan") { ble.startScan() }
-                    .font(.system(size: 14, weight: .medium)).foregroundColor(T.amber)
-            }
-        }
-        .cardStyle()
-    }
-
-    // MARK: Exhaust
     private var exhaustCard: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
@@ -167,11 +246,8 @@ struct ContentView: View {
                 Toggle("", isOn: $enable).labelsHidden().tint(T.amber)
             }
             .padding(.bottom, 14)
-
             Text("Cylinders cut").font(.system(size: 13)).foregroundColor(T.grey).padding(.bottom, 7)
-            SegPicker(options: [(1,"1"),(2,"2"),(3,"3"),(4,"4")], selection: $cut)
-                .padding(.bottom, 15)
-
+            SegPicker(options: [(1,"1"),(2,"2"),(3,"3"),(4,"4")], selection: $cut).padding(.bottom, 15)
             Text("Mode").font(.system(size: 13)).foregroundColor(T.grey).padding(.bottom, 7)
             SegPicker(options: [(0,"B · ECU cuts"),(1,"A · every WOT")],
                       selection: Binding(get: { modeA ? 1 : 0 }, set: { modeA = $0 == 1 }))
@@ -179,7 +255,6 @@ struct ContentView: View {
         .cardStyle()
     }
 
-    // MARK: Status
     private var statusStrip: some View {
         HStack(spacing: 7) {
             switch ble.applyState {
@@ -202,23 +277,17 @@ struct ContentView: View {
             }
             Spacer()
         }
-        .frame(minHeight: 20)
-        .frame(maxWidth: .infinity)
-        .multilineTextAlignment(.center)
-        .padding(.top, 2)
+        .frame(minHeight: 20).frame(maxWidth: .infinity).padding(.top, 2)
     }
 
     private var applyButton: some View {
-        Button {
-            ble.applyConfig(enable: enable, cut: cut, modeA: modeA)
-        } label: {
+        Button { ble.applyConfig(enable: enable, cut: cut, modeA: modeA) } label: {
             HStack(spacing: 8) {
                 Image(systemName: "bolt.fill").font(.system(size: 18))
                 Text("Apply to ECU").font(.system(size: 16, weight: .bold))
             }
             .frame(maxWidth: .infinity).padding(.vertical, 15)
-            .background(T.amber).foregroundColor(T.bg)
-            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .background(T.amber).foregroundColor(T.bg).clipShape(RoundedRectangle(cornerRadius: 12))
         }
     }
 
@@ -233,7 +302,6 @@ struct ContentView: View {
         }
     }
 
-    // MARK: Advanced
     private var advancedRow: some View {
         Button { withAnimation { showAdvanced.toggle() } } label: {
             HStack {
@@ -250,28 +318,20 @@ struct ContentView: View {
             HStack {
                 TextField("40 01 19 00 …", text: $rawCmd)
                     .font(.system(size: 13, design: .monospaced))
-                    .textInputAutocapitalization(.characters).autocorrectionDisabled()
-                    .foregroundColor(.white)
+                    .textInputAutocapitalization(.characters).autocorrectionDisabled().foregroundColor(.white)
                 Button("Send") { ble.sendRaw(rawCmd); rawCmd = "" }
                     .font(.system(size: 14)).foregroundColor(T.amber).disabled(!ble.isConnected)
             }
-            .padding(10)
-            .overlay(RoundedRectangle(cornerRadius: 10).stroke(T.line, lineWidth: 1))
-
+            .padding(10).overlay(RoundedRectangle(cornerRadius: 10).stroke(T.line, lineWidth: 1))
             ScrollView {
                 VStack(alignment: .leading, spacing: 2) {
                     ForEach(Array(ble.log.suffix(80).enumerated()), id: \.offset) { _, l in
-                        Text(l).font(.system(size: 10, design: .monospaced))
-                            .foregroundColor(T.greyLt)
+                        Text(l).font(.system(size: 10, design: .monospaced)).foregroundColor(T.greyLt)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
             }
-            .frame(height: 200)
-            .padding(8)
-            .background(Color(hex: 0x151517))
-            .clipShape(RoundedRectangle(cornerRadius: 10))
-
+            .frame(height: 200).padding(8).background(Color(hex: 0x151517)).clipShape(RoundedRectangle(cornerRadius: 10))
             Button("Clear log") { ble.clearLog() }.font(.system(size: 13)).foregroundColor(T.amber)
         }
         .cardStyle()
