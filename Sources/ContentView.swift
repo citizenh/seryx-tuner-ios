@@ -122,7 +122,7 @@ struct ContentView: View {
     private var header: some View {
         HStack(spacing: 11) {
             ECULogo(size: 32)
-            Text("SERYX TUNER")
+            Text("ECU TUNER")
                 .font(.system(size: 23, weight: .heavy))
                 .foregroundColor(T.amber)
             Spacer()

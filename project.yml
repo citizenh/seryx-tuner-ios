@@ -20,7 +20,7 @@ targets:
         CURRENT_PROJECT_VERSION: "1"
         TARGETED_DEVICE_FAMILY: "1"          # iPhone only
         GENERATE_INFOPLIST_FILE: YES
-        INFOPLIST_KEY_CFBundleDisplayName: "Seryx Tuner"
+        INFOPLIST_KEY_CFBundleDisplayName: "ECU Tuner"
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait"
         INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription: "Connects to your OBD Bluetooth adapter to send tuning settings to your own ECU."
