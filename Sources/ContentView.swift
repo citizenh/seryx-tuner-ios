@@ -83,9 +83,38 @@ struct SegPicker: View {
                     .overlay(RoundedRectangle(cornerRadius: 9).stroke(on ? T.amber : T.line, lineWidth: 1))
                     .clipShape(RoundedRectangle(cornerRadius: 9))
                     .contentShape(Rectangle())
-                    .onTapGesture { selection = opt.tag }
+                    .onTapGesture { withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) { selection = opt.tag } }
             }
         }
+        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: selection)
+    }
+}
+
+// MARK: - Animation helpers
+/// A connection dot with a soft expanding halo.
+struct PulsingDot: View {
+    var color: Color = T.green
+    var size: CGFloat = 9
+    @State private var on = false
+    var body: some View {
+        Circle().fill(color).frame(width: size, height: size)
+            .overlay(
+                Circle().stroke(color, lineWidth: 2)
+                    .scaleEffect(on ? 2.4 : 1).opacity(on ? 0 : 0.7)
+            )
+            .onAppear {
+                withAnimation(.easeOut(duration: 1.4).repeatForever(autoreverses: false)) { on = true }
+            }
+    }
+}
+
+/// Press-to-shrink feedback for buttons.
+struct PressStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.97 : 1)
+            .opacity(configuration.isPressed ? 0.85 : 1)
+            .animation(.spring(response: 0.25, dampingFraction: 0.6), value: configuration.isPressed)
     }
 }
 
@@ -95,7 +124,6 @@ struct ContentView: View {
         TabView {
             DongleView().tabItem { Label("Dongle", systemImage: "dot.radiowaves.left.and.right") }
             TuneView().tabItem { Label("Tune", systemImage: "flame.fill") }
-            LightsView().tabItem { Label("Lights", systemImage: "lightbulb.fill") }
         }
         .tint(T.amber)
         .preferredColorScheme(.dark)
@@ -113,9 +141,13 @@ struct DongleView: View {
                     AppHeader()
                     statusCard
                     scanButton
-                    if !ble.discovered.isEmpty { deviceList }
+                    if !ble.discovered.isEmpty {
+                        deviceList.transition(.opacity.combined(with: .move(edge: .top)))
+                    }
                 }
                 .padding(.horizontal, 16).padding(.bottom, 24)
+                .animation(.spring(response: 0.45, dampingFraction: 0.85), value: ble.isConnected)
+                .animation(.easeInOut(duration: 0.3), value: ble.discovered.count)
             }
         }
     }
@@ -124,6 +156,7 @@ struct DongleView: View {
         HStack(spacing: 12) {
             Image(systemName: ble.isConnected ? "checkmark.seal.fill" : "antenna.radiowaves.left.and.right")
                 .font(.system(size: 26)).foregroundColor(ble.isConnected ? T.green : T.amber)
+                .scaleEffect(ble.isConnected ? 1 : 0.92)
             VStack(alignment: .leading, spacing: 2) {
                 Text(ble.isConnected ? (ble.connectedName.isEmpty ? targetDongle : ble.connectedName) : (ble.isScanning ? "Scanning…" : "Not connected"))
                     .font(.system(size: 16, weight: .medium)).foregroundColor(.white)
@@ -132,9 +165,11 @@ struct DongleView: View {
             }
             Spacer()
             if ble.isConnected {
+                PulsingDot()
                 Button { ble.disconnect() } label: {
                     Text("Disconnect").font(.system(size: 13)).foregroundColor(T.red)
                 }
+                .buttonStyle(PressStyle())
             }
         }
         .cardStyle()
@@ -144,12 +179,15 @@ struct DongleView: View {
         Button { ble.startScan() } label: {
             HStack(spacing: 8) {
                 Image(systemName: ble.isScanning ? "arrow.triangle.2.circlepath" : "magnifyingglass")
+                    .rotationEffect(.degrees(ble.isScanning ? 360 : 0))
+                    .animation(ble.isScanning ? .linear(duration: 1).repeatForever(autoreverses: false) : .default, value: ble.isScanning)
                 Text(ble.isScanning ? "Scanning…" : "Scan for dongles").font(.system(size: 15, weight: .medium))
             }
             .frame(maxWidth: .infinity).padding(.vertical, 13)
             .foregroundColor(T.bg).background(T.amber)
             .clipShape(RoundedRectangle(cornerRadius: 12))
         }
+        .buttonStyle(PressStyle())
     }
 
     private var deviceList: some View {
@@ -173,7 +211,9 @@ struct DongleView: View {
                         if isConn { Image(systemName: "checkmark").font(.system(size: 14)).foregroundColor(T.green) }
                     }
                     .padding(.vertical, 12)
+                    .contentShape(Rectangle())
                 }
+                .buttonStyle(PressStyle())
                 if p.identifier != sortedDevices.last?.identifier {
                     Rectangle().fill(T.line).frame(height: 0.5)
                 }
@@ -206,17 +246,24 @@ struct TuneView: View {
                 VStack(alignment: .leading, spacing: 13) {
                     AppHeader()
                     if ble.isConnected {
-                        exhaustCard
-                        statusStrip
-                        applyButton
-                        readButton
-                        advancedRow
-                        if showAdvanced { advancedBody }
+                        Group {
+                            exhaustCard
+                            statusStrip
+                            applyButton
+                            readButton
+                            advancedRow
+                            if showAdvanced {
+                                advancedBody.transition(.opacity.combined(with: .move(edge: .top)))
+                            }
+                        }
+                        .transition(.opacity.combined(with: .move(edge: .top)))
                     } else {
-                        notConnected
+                        notConnected.transition(.opacity)
                     }
                 }
                 .padding(.horizontal, 16).padding(.bottom, 24)
+                .animation(.spring(response: 0.45, dampingFraction: 0.85), value: ble.isConnected)
+                .animation(.spring(response: 0.35, dampingFraction: 0.8), value: showAdvanced)
             }
         }
         .onChange(of: cut) { _ in ble.markPending() }
@@ -279,6 +326,16 @@ struct TuneView: View {
             Spacer()
         }
         .frame(minHeight: 20).frame(maxWidth: .infinity).padding(.top, 2)
+        .id(stateKey)
+        .transition(.opacity.combined(with: .move(edge: .leading)))
+        .animation(.spring(response: 0.4, dampingFraction: 0.75), value: stateKey)
+    }
+
+    private var stateKey: Int {
+        switch ble.applyState {
+        case .idle: return 0; case .pending: return 1; case .applying: return 2
+        case .verified: return 3; case .mismatch: return 4; case .noReply: return 5
+        }
     }
 
     private var applyButton: some View {
@@ -290,6 +347,7 @@ struct TuneView: View {
             .frame(maxWidth: .infinity).padding(.vertical, 15)
             .background(T.amber).foregroundColor(T.bg).clipShape(RoundedRectangle(cornerRadius: 12))
         }
+        .buttonStyle(PressStyle())
     }
 
     private var readButton: some View {
@@ -301,6 +359,7 @@ struct TuneView: View {
             .frame(maxWidth: .infinity).padding(.vertical, 12)
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(T.line, lineWidth: 1))
         }
+        .buttonStyle(PressStyle())
     }
 
     private var advancedRow: some View {
@@ -336,101 +395,6 @@ struct TuneView: View {
             Button("Clear log") { ble.clearLog() }.font(.system(size: 13)).foregroundColor(T.amber)
         }
         .cardStyle()
-    }
-}
-
-// MARK: - Page 3: Lights
-struct LightsView: View {
-    @EnvironmentObject var ble: BLEManager
-    private let cols = [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)]
-
-    var body: some View {
-        ZStack {
-            T.bg.ignoresSafeArea()
-            ScrollView {
-                VStack(alignment: .leading, spacing: 13) {
-                    AppHeader()
-                    if ble.isConnected {
-                        header
-                        grid
-                        if ble.activeLightStyle != nil { stopButton }
-                        didRow
-                        Text("Drives your front headlamps over UDS zone control. If nothing flashes, try another DID below. Running effects stop when you disconnect.")
-                            .font(.system(size: 12)).foregroundColor(T.grey)
-                    } else {
-                        notConnected
-                    }
-                }
-                .padding(.horizontal, 16).padding(.bottom, 24)
-            }
-        }
-    }
-
-    private var header: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "lightbulb.fill").font(.system(size: 20)).foregroundColor(T.amber)
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Headlight effects").font(.system(size: 16, weight: .medium)).foregroundColor(.white)
-                Text(ble.activeLightStyle == nil ? "Tap a style to run it" : "Running — tap again or Stop")
-                    .font(.system(size: 12)).foregroundColor(T.grey)
-            }
-            Spacer()
-        }
-    }
-
-    private var grid: some View {
-        LazyVGrid(columns: cols, spacing: 12) {
-            ForEach(BLEManager.lightStyles) { style in
-                let on = ble.activeLightStyle == style.id
-                Button { ble.toggleLights(style) } label: {
-                    VStack(spacing: 8) {
-                        Image(systemName: style.icon).font(.system(size: 24)).foregroundColor(on ? T.bg : T.amber)
-                        Text(style.name).font(.system(size: 14, weight: .medium)).foregroundColor(on ? T.bg : .white)
-                    }
-                    .frame(maxWidth: .infinity).padding(.vertical, 20)
-                    .background(on ? T.amber : T.card)
-                    .overlay(RoundedRectangle(cornerRadius: 14).stroke(on ? T.amber : T.cardBorder, lineWidth: 1))
-                    .clipShape(RoundedRectangle(cornerRadius: 14))
-                }
-            }
-        }
-    }
-
-    private var stopButton: some View {
-        Button { ble.stopLights() } label: {
-            HStack(spacing: 8) {
-                Image(systemName: "stop.fill").font(.system(size: 16))
-                Text("Stop").font(.system(size: 16, weight: .bold))
-            }
-            .frame(maxWidth: .infinity).padding(.vertical, 14)
-            .background(T.red).foregroundColor(.white).clipShape(RoundedRectangle(cornerRadius: 12))
-        }
-    }
-
-    private var didRow: some View {
-        HStack {
-            Text("Headlamp DID").font(.system(size: 13)).foregroundColor(T.grey)
-            Spacer()
-            ForEach([UInt16(0x0008), 0xD008, 0x0011], id: \.self) { did in
-                let on = ble.lightDID == did
-                Text(String(format: "%04X", did))
-                    .font(.system(size: 13, design: .monospaced))
-                    .padding(.horizontal, 10).padding(.vertical, 6)
-                    .background(on ? T.amber : T.bg).foregroundColor(on ? T.bg : T.greyLt)
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(on ? T.amber : T.line, lineWidth: 1))
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                    .onTapGesture { ble.lightDID = did }
-            }
-        }
-    }
-
-    private var notConnected: some View {
-        VStack(spacing: 10) {
-            Image(systemName: "lightbulb.slash").font(.system(size: 34)).foregroundColor(T.grey)
-            Text("Connect your dongle").font(.system(size: 16, weight: .medium)).foregroundColor(.white)
-            Text("Open the Dongle tab to connect first.").font(.system(size: 13)).foregroundColor(T.grey)
-        }
-        .frame(maxWidth: .infinity).padding(.vertical, 60)
     }
 }
 

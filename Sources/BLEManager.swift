@@ -54,9 +54,17 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     // MARK: Headlight animations (UDS 2F zone control to front headlamps)
     @Published var activeLightStyle: String? = nil
     @Published var lightDID: UInt16 = 0x0008     // swap to 0xD008 / 0x0011 if lamps don't respond
-    // W205 front headlamps (HLI_FL212 / HLI_FR212): request/response CAN ids.
-    private let hlFL: (tx: UInt32, rx: UInt32) = (0x76A, 0x4AD)
-    private let hlFR: (tx: UInt32, rx: UInt32) = (0x772, 0x4AE)
+    // Front headlamp request/response CAN id pairs, per module variant (pick on-car).
+    @Published var lampVariantId: String = "212"
+    static let lampVariants: [(id: String, name: String, fl: (UInt32, UInt32), fr: (UInt32, UInt32))] = [
+        ("212", "212 / 176", (0x76A, 0x4AD), (0x772, 0x4AE)),
+        ("247", "247",       (0x650, 0x5D0), (0x656, 0x5D6))
+    ]
+    private var lampVariant: (id: String, name: String, fl: (UInt32, UInt32), fr: (UInt32, UInt32)) {
+        Self.lampVariants.first { $0.id == lampVariantId } ?? Self.lampVariants[0]
+    }
+    private var hlFL: (tx: UInt32, rx: UInt32) { (lampVariant.fl.0, lampVariant.fl.1) }
+    private var hlFR: (tx: UInt32, rx: UInt32) { (lampVariant.fr.0, lampVariant.fr.1) }
     private var lightTimer: Timer?
     private var lightStep = 0
     private var currentStyle: LightStyle?
