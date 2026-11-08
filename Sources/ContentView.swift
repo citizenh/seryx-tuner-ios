@@ -140,7 +140,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(ble.isConnected ? (ble.connectedName.isEmpty ? "V2502615C3" : ble.connectedName) : (ble.isScanning ? "Scanning…" : "No dongle"))
                     .font(.system(size: 15, weight: .medium)).foregroundColor(.white)
-                Text(ble.isConnected ? "mbito · auto-connected" : ble.status)
+                Text(ble.isConnected ? "ESP32 dongle · auto-connected" : ble.status)
                     .font(.system(size: 12)).foregroundColor(T.grey)
             }
             Spacer()

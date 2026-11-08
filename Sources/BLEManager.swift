@@ -164,7 +164,7 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     /// Write raw bytes (given as a hex string) straight to the mbito 0xFF01 characteristic.
     func sendMbitoHex(_ hex: String) {
         let bytes = Self.hexToBytes(hex)
-        guard !bytes.isEmpty else { logLine("mbito: empty/invalid hex"); return }
+        guard !bytes.isEmpty else { logLine("ESP32: empty/invalid hex"); return }
         writeMbito(bytes)
     }
 
@@ -244,7 +244,7 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     }
 
     private func writeMbito(_ bytes: [UInt8]) {
-        guard let p = peripheral, let c = mbitoChar else { logLine("mbito: not connected to 0xFF01"); return }
+        guard let p = peripheral, let c = mbitoChar else { logLine("ESP32: not connected to 0xFF01"); return }
         let data = Data(bytes)
         let type: CBCharacteristicWriteType =
             c.properties.contains(.writeWithoutResponse) ? .withoutResponse : .withResponse
@@ -395,11 +395,11 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
                     isConnected = true
                     connectedName = p.name ?? "V2502615C3"
                     applyState = .idle
-                    status = "Connected (mbito 0xFF01)"
-                    logLine("mbito dongle detected — subscribing to 0xFF01")
+                    status = "Connected (ESP32 0xFF01)"
+                    logLine("ESP32 dongle detected — subscribing to 0xFF01")
                     // Replay the app's connect handshake once the CCCD write settles.
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-                        self?.logLine("mbito init handshake (04/01)")
+                        self?.logLine("ESP32 init handshake (04/01)")
                         self?.mbitoInit()
                     }
                 }
