@@ -124,6 +124,7 @@ struct ContentView: View {
         TabView {
             DongleView().tabItem { Label("Dongle", systemImage: "dot.radiowaves.left.and.right") }
             TuneView().tabItem { Label("Tune", systemImage: "flame.fill") }
+            FaultsView().tabItem { Label("Faults", systemImage: "exclamationmark.triangle.fill") }
         }
         .tint(T.amber)
         .preferredColorScheme(.dark)
@@ -418,6 +419,131 @@ struct TuneView: View {
             Button("Clear log") { ble.clearLog() }.font(.system(size: 13)).foregroundColor(T.amber)
         }
         .cardStyle()
+    }
+}
+
+// MARK: - Page 3: Fault codes (DTC)
+struct FaultsView: View {
+    @EnvironmentObject var ble: BLEManager
+    @State private var confirmClear = false
+
+    var body: some View {
+        ZStack {
+            T.bg.ignoresSafeArea()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 13) {
+                    AppHeader()
+                    if !ble.isConnected {
+                        notConnectedCard
+                    } else {
+                        scanButton
+                        if !ble.dtcResults.isEmpty || !ble.dtcScanned.isEmpty {
+                            summaryStrip
+                            ForEach(ble.dtcScanned, id: \.self) { module in
+                                moduleCard(module)
+                            }
+                            clearButton
+                        }
+                    }
+                }
+                .padding(.horizontal, 16).padding(.bottom, 24)
+                .animation(.spring(response: 0.45, dampingFraction: 0.85), value: ble.dtcResults.count)
+                .animation(.easeInOut(duration: 0.3), value: ble.dtcScanned.count)
+            }
+        }
+        .alert("Clear all fault codes?", isPresented: $confirmClear) {
+            Button("Cancel", role: .cancel) {}
+            Button("Clear codes", role: .destructive) { ble.clearDTCs() }
+        } message: {
+            Text("This erases stored DTCs on every scanned module. Codes for faults that are still present will return on the next drive cycle.")
+        }
+    }
+
+    private var notConnectedCard: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "antenna.radiowaves.left.and.right.slash")
+                .font(.system(size: 20)).foregroundColor(T.grey)
+            Text("Connect your dongle on the Dongle tab to read fault codes.")
+                .font(.system(size: 14)).foregroundColor(T.greyLt)
+            Spacer(minLength: 0)
+        }
+        .cardStyle()
+    }
+
+    private var scanButton: some View {
+        Button { ble.scanDTCs() } label: {
+            HStack(spacing: 8) {
+                Image(systemName: ble.dtcScanning ? "arrow.triangle.2.circlepath" : "magnifyingglass")
+                    .rotationEffect(.degrees(ble.dtcScanning ? 360 : 0))
+                    .animation(ble.dtcScanning ? .linear(duration: 1).repeatForever(autoreverses: false) : .default, value: ble.dtcScanning)
+                Text(ble.dtcScanning ? "Scanning modules…" : "Scan for faults").font(.system(size: 15, weight: .medium))
+            }
+            .frame(maxWidth: .infinity).padding(.vertical, 13)
+            .foregroundColor(T.bg).background(T.amber)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+        }
+        .buttonStyle(PressStyle())
+        .disabled(ble.dtcScanning)
+    }
+
+    private var summaryStrip: some View {
+        let faults = ble.dtcResults.count
+        return HStack(spacing: 10) {
+            Image(systemName: faults == 0 ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+                .font(.system(size: 18)).foregroundColor(faults == 0 ? T.green : T.amber)
+            Text(faults == 0
+                 ? "No faults · \(ble.dtcScanned.count) modules"
+                 : "\(faults) fault\(faults == 1 ? "" : "s") · \(ble.dtcScanned.count) modules")
+                .font(.system(size: 14, weight: .semibold)).foregroundColor(.white)
+            Spacer()
+        }
+        .cardStyle()
+    }
+
+    private func moduleCard(_ module: String) -> some View {
+        let faults = ble.dtcResults.filter { $0.ecu == module }
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text(module).font(.system(size: 14, weight: .semibold)).foregroundColor(T.greyLt)
+                Spacer()
+                if faults.isEmpty {
+                    Text("OK").font(.system(size: 11, weight: .bold))
+                        .padding(.horizontal, 7).padding(.vertical, 2)
+                        .background(T.green.opacity(0.16)).foregroundColor(T.green).clipShape(Capsule())
+                }
+            }
+            .padding(.bottom, faults.isEmpty ? 0 : 10)
+            ForEach(Array(faults.enumerated()), id: \.element.id) { i, f in
+                HStack(spacing: 10) {
+                    Circle().fill(f.active ? T.red : T.grey).frame(width: 7, height: 7)
+                    Text(f.code).font(.system(size: 15, weight: .medium, design: .monospaced)).foregroundColor(.white)
+                    Spacer()
+                    Text(f.active ? "Active" : "Stored")
+                        .font(.system(size: 11, weight: .medium))
+                        .padding(.horizontal, 7).padding(.vertical, 2)
+                        .background((f.active ? T.red : T.grey).opacity(0.16))
+                        .foregroundColor(f.active ? T.red : T.grey).clipShape(Capsule())
+                }
+                .padding(.vertical, 8)
+                if i != faults.count - 1 { Rectangle().fill(T.line).frame(height: 0.5) }
+            }
+        }
+        .cardStyle()
+    }
+
+    private var clearButton: some View {
+        Button { confirmClear = true } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "trash")
+                Text("Clear all codes").font(.system(size: 15, weight: .medium))
+            }
+            .frame(maxWidth: .infinity).padding(.vertical, 13)
+            .foregroundColor(T.red)
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(T.red.opacity(0.5), lineWidth: 1))
+        }
+        .buttonStyle(PressStyle())
+        .disabled(ble.dtcResults.isEmpty)
+        .opacity(ble.dtcResults.isEmpty ? 0.4 : 1)
     }
 }
 

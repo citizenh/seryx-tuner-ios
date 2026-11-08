@@ -3,6 +3,15 @@ import CoreBluetooth
 
 enum ApplyState { case idle, pending, applying, verified, mismatch, noReply }
 
+/// One stored fault read from a module (UDS 19 02).
+struct DTCItem: Identifiable {
+    let id = UUID()
+    let ecu: String
+    let code: String      // 6-hex raw DTC, e.g. "9C5400"
+    let status: UInt8     // DTC status byte (bit0 = testFailed)
+    var active: Bool { status & 0x01 != 0 }
+}
+
 /// A headlight animation = a looping sequence of per-lamp 6-zone bitmasks.
 /// Each step sends a UDS 2F InputOutputControl frame to each front headlamp.
 struct LightStyle: Identifiable {
@@ -45,6 +54,9 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     // MARK: Apply/verify feedback
     @Published var connectedName = ""
     @Published var vin = ""
+    @Published var dtcScanning = false
+    @Published var dtcResults: [DTCItem] = []
+    @Published var dtcScanned: [String] = []      // module names that answered the scan
     @Published var applyState: ApplyState = .idle
     @Published var applyDetail = "Applying to ECU…"
     private var expected: (en: Bool, cut: Int, modeA: Bool)?
@@ -111,6 +123,11 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         connectedName = "V2502615C3"
         vin = "WDD2050461A123456"
         applyState = .verified
+        dtcScanned = ["Engine", "Transmission", "Front SAM", "Cluster"]
+        dtcResults = [
+            DTCItem(ecu: "Engine", code: "9C5400", status: 0x09),
+            DTCItem(ecu: "Front SAM", code: "B10A01", status: 0x08),
+        ]
         logLine("Preview mode — demo connection")
         #endif
     }
@@ -237,6 +254,61 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     func readVIN() {
         guard mbitoChar != nil else { return }
         writeMbito(Self.buildMbitoV2(senderId: 0x7E0, receiverId: 0x7E8, payload: [0x22, 0xF1, 0x90]))
+    }
+
+    // MARK: DTC scan ------------------------------------------------------------------
+    // Request CAN ids (tx) + response (rx) for the modules mbito scanned on this car.
+    static let dtcEcus: [(name: String, tx: UInt32, rx: UInt32)] = [
+        ("Engine", 0x7E0, 0x7E8), ("Transmission", 0x7E1, 0x7E9),
+        ("Module 7E2", 0x7E2, 0x7EA), ("Module 7E3", 0x7E3, 0x7EB), ("Module 7E5", 0x7E5, 0x7ED),
+        ("EZS / EIS", 0x607, 0x587), ("Cluster", 0x609, 0x589),
+        ("Front SAM", 0x640, 0x5C0), ("Rear SAM", 0x641, 0x5C1),
+        ("Module 600", 0x600, 0x580), ("Module 602", 0x602, 0x582),
+        ("Module 60D", 0x60D, 0x58D), ("Module 61D", 0x61D, 0x59D),
+        ("Module 620", 0x620, 0x5A0), ("Module 650", 0x650, 0x5D0)
+    ]
+
+    func scanDTCs() {
+        guard mbitoChar != nil, !dtcScanning else { return }
+        dtcResults = []; dtcScanned = []; dtcScanning = true
+        logLine("DTC scan: \(Self.dtcEcus.count) modules")
+        for (i, e) in Self.dtcEcus.enumerated() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Double(i) * 0.18) { [weak self] in
+                guard let self = self, self.dtcScanning else { return }
+                self.writeMbito(Self.buildMbitoV2(senderId: e.tx, receiverId: e.rx, payload: [0x19, 0x02, 0x0D]))
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Double(Self.dtcEcus.count) * 0.18 + 1.2) { [weak self] in
+            self?.dtcScanning = false
+        }
+    }
+
+    /// Clear fault codes on every scanned module (UDS 14 FF FF FF).
+    func clearDTCs() {
+        guard mbitoChar != nil else { return }
+        logLine("DTC clear: all modules")
+        for (i, e) in Self.dtcEcus.enumerated() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Double(i) * 0.12) { [weak self] in
+                self?.writeMbito(Self.buildMbitoV2(senderId: e.tx, receiverId: e.rx, payload: [0x14, 0xFF, 0xFF, 0xFF]))
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            self?.dtcResults = []; self?.dtcScanned = []
+        }
+    }
+
+    private func handleDTCResponse(sender: UInt32, _ cmd: [UInt8]) {
+        let name = Self.dtcEcus.first { $0.tx == sender }?.name ?? String(format: "Module %03X", sender)
+        if !dtcScanned.contains(name) { dtcScanned.append(name) }
+        // 59 02 <mask> then groups of [DTC hi, mid, lo, status]
+        var i = 3
+        while i + 3 < cmd.count {
+            let a = cmd[i], b = cmd[i+1], c = cmd[i+2], st = cmd[i+3]
+            if a == 0 && b == 0 && c == 0 { break }
+            let code = String(format: "%02X%02X%02X", a, b, c)
+            dtcResults.append(DTCItem(ecu: name, code: code, status: st))
+            i += 4
+        }
     }
 
     // MARK: Headlight animation engine ------------------------------------------------
@@ -555,6 +627,12 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
                     let ascii = cmd[3...].prefix(17).map { (32...126).contains($0) ? Character(UnicodeScalar($0)) : " " }
                     let v = String(ascii).trimmingCharacters(in: .whitespaces)
                     if v.count >= 11 { vin = v; logLine("VIN ← \(v)") }
+                }
+                // DTC reply: 59 02 <mask> [dtc3 status]...  (sender id echoed at bytes[7..10] LE)
+                if cmd.count >= 3, cmd[0] == 0x59, cmd[1] == 0x02 {
+                    let sender = UInt32(bytes[7]) | UInt32(bytes[8]) << 8
+                        | UInt32(bytes[9]) << 16 | UInt32(bytes[10]) << 24
+                    handleDTCResponse(sender: sender, cmd)
                 }
             }
             return
