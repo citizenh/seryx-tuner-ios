@@ -1,6 +1,8 @@
 import Foundation
 import CoreBluetooth
 
+enum ApplyState { case idle, pending, applying, verified, mismatch, noReply }
+
 /// Talks to a Bluetooth-LE ELM327 OBD adapter and sends the Seryx custom
 /// config frames (CAN id 0x7E0, payload `01 A0 <feat> <val>` for SET, `01 A1` for GET).
 /// The ECU firmware handler writes the arming magic + checksum itself, so the app
@@ -29,6 +31,15 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     private let mbitoCharUUID = CBUUID(string: "FF01")
     private var mbitoChar: CBCharacteristic?
 
+    // MARK: Apply/verify feedback
+    @Published var connectedName = ""
+    @Published var applyState: ApplyState = .idle
+    @Published var applyDetail = "Applying to ECU…"
+    private var expected: (en: Bool, cut: Int, modeA: Bool)?
+    private var awaitingVerify = false
+    private var verifyToken = 0
+    private let targetName = "V2502615C3"   // the mbito dongle always advertises this
+
     // Known ELM327 BLE service/characteristic families (adapter-dependent).
     // We don't hard-filter on scan; on connect we pick any char that is writable+notifiable.
     private let knownServiceUUIDs: [CBUUID] = [
@@ -45,6 +56,14 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     override init() {
         super.init()
         central = CBCentralManager(delegate: self, queue: .main)
+        #if targetEnvironment(simulator)
+        // Demo state so the full UI renders for CI preview screenshots (no BLE in the sim).
+        isConnected = true
+        mbitoMode = true
+        connectedName = "V2502615C3"
+        applyState = .verified
+        logLine("Preview mode — demo connection")
+        #endif
     }
 
     // MARK: Logging
@@ -121,10 +140,13 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
             guard let self = self else { return }
             self.lastReadback = resp
             self.logLine("READBACK ← \(resp)")
-            // Positive read response starts with service echo 0x41 (0x01 + 0x40).
-            let clean = resp.replacingOccurrences(of: " ", with: "").uppercased()
-            self.status = clean.contains("41A1") || clean.hasPrefix("41") || clean.contains("7E8") && clean.contains("41")
-                ? "Applied ✓" : "No valid reply"
+            // Positive read response carries the service echo 0x41. Slice from it and verify.
+            let b = Self.hexToBytes(resp)
+            if let idx = b.firstIndex(of: 0x41) {
+                self.resolveVerify(Array(b[idx...]))
+            } else if self.awaitingVerify {
+                self.applyState = .noReply; self.awaitingVerify = false
+            }
         }
     }
 
@@ -158,6 +180,67 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     func sendMbitoReadback() {
         let frame = Self.buildMbitoV2(senderId: 0x7E0, receiverId: 0x7E8, payload: [0x01, 0xA1])
         writeMbito(frame)
+    }
+
+    // MARK: High-level apply/verify (drives the UI feedback) ------------------------
+
+    func markPending() {
+        if applyState != .applying { applyState = .pending }
+    }
+
+    /// Apply config, then auto-read-back and verify the ECU echoes what we set.
+    func applyConfig(enable: Bool, cut: Int, modeA: Bool) {
+        expected = (enable, cut, modeA)
+        applyState = .applying
+        applyDetail = "Applying to ECU…"
+        awaitingVerify = false
+        let c = max(1, min(4, cut))
+        if mbitoMode {
+            sendMbitoFeature(1, enable ? 1 : 0)
+            sendMbitoFeature(2, c)
+            sendMbitoFeature(3, modeA ? 1 : 0)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
+                guard let self = self else { return }
+                self.applyDetail = "Reading back…"
+                self.awaitingVerify = true
+                self.sendMbitoReadback()
+            }
+        } else {
+            setFeature(1, enable ? 1 : 0); setFeature(2, c); setFeature(3, modeA ? 1 : 0)
+            applyDetail = "Reading back…"
+            awaitingVerify = true
+            readBack()
+        }
+        armVerifyTimeout()
+    }
+
+    /// Plain read-back (no expected comparison — just confirm comms).
+    func readConfig() {
+        expected = nil
+        applyState = .applying
+        applyDetail = "Reading back…"
+        awaitingVerify = true
+        if mbitoMode { sendMbitoReadback() } else { readBack() }
+        armVerifyTimeout()
+    }
+
+    private func armVerifyTimeout() {
+        verifyToken += 1
+        let tok = verifyToken
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) { [weak self] in
+            guard let self = self, tok == self.verifyToken else { return }
+            if self.applyState == .applying { self.applyState = .noReply; self.awaitingVerify = false }
+        }
+    }
+
+    /// Parse a `41 <enable> <depth> <mode> …` config reply and resolve the apply state.
+    private func resolveVerify(_ cmd: [UInt8]) {
+        guard awaitingVerify, let first = cmd.first, first == 0x41 else { return }
+        awaitingVerify = false
+        verifyToken += 1
+        guard let e = expected, cmd.count >= 4 else { applyState = .verified; return }
+        let en = cmd[1] != 0, ct = Int(cmd[2]), md = cmd[3] != 0
+        applyState = (en == e.en && ct == e.cut && md == e.modeA) ? .verified : .mismatch
     }
 
     private func writeMbito(_ bytes: [UInt8]) {
@@ -260,7 +343,7 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     // MARK: CBCentralManagerDelegate
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         switch central.state {
-        case .poweredOn:  status = "Ready"
+        case .poweredOn:  status = "Ready"; startScan()
         case .poweredOff: status = "Bluetooth off"; isConnected = false
         case .unauthorized: status = "Bluetooth not allowed"
         default: status = "Bluetooth unavailable"
@@ -271,6 +354,11 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         if !discovered.contains(where: { $0.identifier == p.identifier }) {
             discovered.append(p)
             logLine("Found: \(p.name ?? "Unknown") (\(RSSI))")
+        }
+        // Auto-connect to the known mbito dongle name.
+        if !isConnected, p.name == targetName {
+            logLine("Auto-connecting to \(targetName)")
+            connect(p)
         }
     }
     func centralManager(_ central: CBCentralManager, didConnect p: CBPeripheral) {
@@ -284,7 +372,10 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         isConnected = false
         writeChar = nil; notifyChar = nil
         mbitoChar = nil; mbitoMode = false
+        connectedName = ""; applyState = .idle; awaitingVerify = false
         status = "Disconnected"
+        // Keep trying to reconnect to the dongle.
+        startScan()
     }
 
     // MARK: CBPeripheralDelegate
@@ -302,6 +393,8 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
                 p.setNotifyValue(true, for: c)
                 if !isConnected {
                     isConnected = true
+                    connectedName = p.name ?? "V2502615C3"
+                    applyState = .idle
                     status = "Connected (mbito 0xFF01)"
                     logLine("mbito dongle detected — subscribing to 0xFF01")
                     // Replay the app's connect handshake once the CCCD write settles.
@@ -322,6 +415,8 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         }
         if !mbitoMode && writeChar != nil && notifyChar != nil && !isConnected {
             isConnected = true
+            connectedName = p.name ?? ""
+            applyState = .idle
             status = "Connected"
             logLine("Connected – initialising adapter")
             initAdapter()
@@ -330,12 +425,17 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     func peripheral(_ p: CBPeripheral, didUpdateValueFor c: CBCharacteristic, error: Error?) {
         guard let d = c.value else { return }
         if mbitoMode {
-            let hex = d.map { String(format: "%02X", $0) }.joined(separator: " ")
+            let bytes = [UInt8](d)
+            let hex = bytes.map { String(format: "%02X", $0) }.joined(separator: " ")
             lastMbitoRx = hex
             if let a = String(data: d, encoding: .ascii), a.contains("enabled") {
                 logLine("RX ← \(hex)   (dongle ready: \"enabled\")")
             } else {
                 logLine("RX ← \(hex)")
+            }
+            // Verify: a C0 response carries the UDS reply command starting at offset 25.
+            if bytes.count >= 26, bytes[0] == 0xC0 {
+                resolveVerify(Array(bytes[25...]))
             }
             return
         }

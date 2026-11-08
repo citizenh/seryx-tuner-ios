@@ -1,156 +1,288 @@
 import SwiftUI
 import CoreBluetooth
 
+// MARK: - ECUTuner theme
+private extension Color {
+    init(hex: UInt) {
+        self.init(.sRGB,
+                  red: Double((hex >> 16) & 0xFF) / 255,
+                  green: Double((hex >> 8) & 0xFF) / 255,
+                  blue: Double(hex & 0xFF) / 255,
+                  opacity: 1)
+    }
+}
+private enum T {
+    static let bg = Color(hex: 0x1D1E20)
+    static let card = Color(hex: 0x252629)
+    static let cardBorder = Color(hex: 0x3C3D41)
+    static let line = Color(hex: 0x46474B)
+    static let amber = Color(hex: 0xFFA51F)
+    static let grey = Color(hex: 0x9B9DA3)
+    static let greyLt = Color(hex: 0xC8CACF)
+    static let green = Color(hex: 0x3DDC73)
+    static let red = Color(hex: 0xFF6B5E)
+}
+
+// MARK: - ECUTuner "ET" logo, redrawn as vector
+struct ECULogo: View {
+    var size: CGFloat = 32
+    var body: some View {
+        let s = size / 160
+        ZStack(alignment: .topLeading) {
+            Path { p in
+                p.move(to: CGPoint(x: 24*s, y: 0))
+                p.addLine(to: CGPoint(x: 160*s, y: 0))
+                p.addLine(to: CGPoint(x: 136*s, y: 160*s))
+                p.addLine(to: CGPoint(x: 0, y: 160*s))
+                p.closeSubpath()
+            }.fill(T.amber)
+            Path { p in
+                // E
+                for (i, pt) in [(26,38),(72,38),(72,54),(44,54),(44,72),(68,72),(68,88),(44,88),(44,106),(72,106),(72,122),(26,122)].enumerated() {
+                    let c = CGPoint(x: CGFloat(pt.0)*s, y: CGFloat(pt.1)*s)
+                    if i == 0 { p.move(to: c) } else { p.addLine(to: c) }
+                }
+                p.closeSubpath()
+                // T
+                for (i, pt) in [(78,38),(132,38),(132,54),(114,54),(114,122),(96,122),(96,54),(78,54)].enumerated() {
+                    let c = CGPoint(x: CGFloat(pt.0)*s, y: CGFloat(pt.1)*s)
+                    if i == 0 { p.move(to: c) } else { p.addLine(to: c) }
+                }
+                p.closeSubpath()
+            }
+            .fill(.white)
+            .transformEffect(CGAffineTransform(a: 1, b: 0, c: CGFloat(tan(-8 * Double.pi / 180)), d: 1, tx: 12*s, ty: 0))
+        }
+        .frame(width: size, height: size)
+    }
+}
+
+// MARK: - Segmented picker (ECUTuner look)
+struct SegPicker: View {
+    let options: [(tag: Int, label: String)]
+    @Binding var selection: Int
+    var onChange: (() -> Void)? = nil
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(options, id: \.tag) { opt in
+                let on = selection == opt.tag
+                Text(opt.label)
+                    .font(.system(size: opt.label.count > 2 ? 13 : 15, weight: on ? .semibold : .regular))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 9)
+                    .background(on ? (opt.label.count > 2 ? Color(hex: 0x303134) : T.amber) : T.bg)
+                    .foregroundColor(on ? (opt.label.count > 2 ? .white : T.bg) : T.greyLt)
+                    .overlay(RoundedRectangle(cornerRadius: 9).stroke(on ? T.amber : T.line, lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: 9))
+                    .contentShape(Rectangle())
+                    .onTapGesture { selection = opt.tag; onChange?() }
+            }
+        }
+    }
+}
+
 struct ContentView: View {
     @EnvironmentObject var ble: BLEManager
 
     @State private var enable = true
-    @State private var cut = 1            // cylinders cut: 1..4
-    @State private var modeA = false      // false = Mode B, true = Mode A
-    @State private var showRaw = false
+    @State private var cut = 1
+    @State private var modeA = false
+    @State private var showAdvanced = false
     @State private var rawCmd = ""
 
-    private let orange = Color(red: 1.0, green: 0.42, blue: 0.0)
-
     var body: some View {
-        NavigationView {
-            Form {
-                connectionSection
-                if ble.isConnected {
-                    configSection
-                    actionSection
-                }
-                if showRaw { rawSection }
-                logSection
-            }
-            .navigationTitle("SERYX TUNER")
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button(showRaw ? "Hide raw" : "Raw") { showRaw.toggle() }
-                }
-            }
-        }
-    }
-
-    // MARK: Connection
-    private var connectionSection: some View {
-        Section(header: Text("Adapter")) {
-            HStack {
-                Circle().fill(ble.isConnected ? .green : .gray).frame(width: 10, height: 10)
-                Text(ble.status).foregroundColor(.secondary)
-                Spacer()
-                if ble.isConnected {
-                    Button("Disconnect", role: .destructive) { ble.disconnect() }
-                } else {
-                    Button(ble.isScanning ? "Scanning…" : "Scan") { ble.startScan() }
-                        .disabled(ble.isScanning)
-                }
-            }
-            if !ble.isConnected {
-                ForEach(ble.discovered, id: \.identifier) { p in
-                    Button {
-                        ble.connect(p)
-                    } label: {
-                        HStack {
-                            Image(systemName: "dot.radiowaves.left.and.right")
-                            Text(p.name ?? "Unknown adapter")
-                            Spacer()
-                        }
+        ZStack {
+            T.bg.ignoresSafeArea()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 13) {
+                    header
+                    adapterCard
+                    if ble.isConnected {
+                        exhaustCard
+                        statusStrip
+                        applyButton
+                        readButton
                     }
+                    advancedRow
+                    if showAdvanced { advancedBody }
                 }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 24)
             }
         }
+        .preferredColorScheme(.dark)
+        .onChange(of: cut) { _ in markDirty() }
+        .onChange(of: modeA) { _ in markDirty() }
+        .onChange(of: enable) { _ in markDirty() }
     }
 
-    // MARK: Config
-    private var configSection: some View {
-        Section(header: Text("Upshift cut")) {
-            Toggle("Enabled", isOn: $enable).tint(orange)
+    private func markDirty() { if ble.isConnected { ble.markPending() } }
 
-            Stepper(value: $cut, in: 1...4) {
-                HStack {
-                    Text("Cylinders cut")
-                    Spacer()
-                    Text("\(cut)").bold().foregroundColor(orange)
-                }
-            }
-
-            Picker("Mode", selection: $modeA) {
-                Text("B — only when ECU cuts").tag(false)
-                Text("A — every Sport+ WOT upshift").tag(true)
-            }
-            .pickerStyle(.inline)
+    // MARK: Header
+    private var header: some View {
+        HStack(spacing: 11) {
+            ECULogo(size: 32)
+            Text("SERYX TUNER")
+                .font(.system(size: 23, weight: .heavy))
+                .foregroundColor(T.amber)
+            Spacer()
         }
+        .padding(.top, 8)
+        .padding(.bottom, 4)
     }
 
-    // MARK: Actions
-    private var actionSection: some View {
-        Section(footer: ble.mbitoMode
-                ? Text("mbito dongle: sends the V2 frame to 0xFF01 (01 A0 → 7E0). Tune request_type / timeout in the Raw box if no reply.")
-                : Text("")) {
-            Button {
-                if ble.mbitoMode {
-                    ble.sendMbitoFeature(1, enable ? 1 : 0)
-                    ble.sendMbitoFeature(2, max(1, min(4, cut)))
-                    ble.sendMbitoFeature(3, modeA ? 1 : 0)
-                    ble.sendMbitoReadback()
-                } else {
-                    ble.applyUpshift(enable: enable, cut: cut, modeA: modeA)
-                }
-            } label: {
-                HStack { Spacer(); Text(ble.mbitoMode ? "APPLY (mbito)" : "APPLY TO ECU").bold(); Spacer() }
+    // MARK: Adapter
+    private var adapterCard: some View {
+        HStack(spacing: 12) {
+            Image(systemName: ble.isConnected ? "bolt.horizontal.circle.fill" : "antenna.radiowaves.left.and.right")
+                .font(.system(size: 24))
+                .foregroundColor(T.amber)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(ble.isConnected ? (ble.connectedName.isEmpty ? "V2502615C3" : ble.connectedName) : (ble.isScanning ? "Scanning…" : "No dongle"))
+                    .font(.system(size: 15, weight: .medium)).foregroundColor(.white)
+                Text(ble.isConnected ? "mbito · auto-connected" : ble.status)
+                    .font(.system(size: 12)).foregroundColor(T.grey)
             }
-            .listRowBackground(orange)
-            .foregroundColor(.black)
-
-            Button("Read back from ECU") {
-                if ble.mbitoMode { ble.sendMbitoReadback() } else { ble.readBack() }
-            }
-            if ble.mbitoMode, !ble.lastMbitoRx.isEmpty {
-                Text("RX: \(ble.lastMbitoRx)")
-                    .font(.system(.footnote, design: .monospaced))
-                    .foregroundColor(.secondary)
-            } else if !ble.lastReadback.isEmpty {
-                Text("ECU: \(ble.lastReadback)")
-                    .font(.system(.footnote, design: .monospaced))
-                    .foregroundColor(.secondary)
-            }
-        }
-    }
-
-    // MARK: Raw debug
-    private var rawSection: some View {
-        Section(header: Text("Raw command")) {
-            HStack {
-                TextField("e.g. 01A00201", text: $rawCmd)
-                    .textInputAutocapitalization(.characters)
-                    .autocorrectionDisabled()
-                    .font(.system(.body, design: .monospaced))
-                Button("Send") { ble.sendRaw(rawCmd); rawCmd = "" }
-                    .disabled(!ble.isConnected)
-            }
-            if ble.mbitoMode {
-                Text("mbito frame → 0xFF01 (verified), LE:\n40 01 19 00 | 00 00 FF | E0 07 00 00 | E8 07 00 00 | F4 01 | 00 00 | 20 00 | 04 00 | 04 00 | 01 A0 01 01\n[outer 40/seq/len] [rt/nr/respt] sender receiver tmo rtmo rlen reqln ares  payload")
-                    .font(.caption2).foregroundColor(.secondary)
+            Spacer()
+            if ble.isConnected {
+                Circle().fill(T.green).frame(width: 9, height: 9)
             } else {
-                Text("SET = 01 A0 <feat> <val> · GET = 01 A1\nfeat1=enable  feat2=cut(1-4)  feat3=mode(A=1/B=0)")
-                    .font(.caption2).foregroundColor(.secondary)
+                Button(ble.isScanning ? "…" : "Scan") { ble.startScan() }
+                    .font(.system(size: 14, weight: .medium)).foregroundColor(T.amber)
             }
+        }
+        .cardStyle()
+    }
+
+    // MARK: Exhaust
+    private var exhaustCard: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 10) {
+                Image(systemName: "flame.fill").font(.system(size: 20)).foregroundColor(T.amber)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Exhaust").font(.system(size: 16, weight: .medium)).foregroundColor(.white)
+                    Text("Burble on upshift").font(.system(size: 12)).foregroundColor(T.grey)
+                }
+                Spacer()
+                Toggle("", isOn: $enable).labelsHidden().tint(T.amber)
+            }
+            .padding(.bottom, 14)
+
+            Text("Cylinders cut").font(.system(size: 13)).foregroundColor(T.grey).padding(.bottom, 7)
+            SegPicker(options: [(1,"1"),(2,"2"),(3,"3"),(4,"4")], selection: $cut)
+                .padding(.bottom, 15)
+
+            Text("Mode").font(.system(size: 13)).foregroundColor(T.grey).padding(.bottom, 7)
+            SegPicker(options: [(0,"B · ECU cuts"),(1,"A · every WOT")],
+                      selection: Binding(get: { modeA ? 1 : 0 }, set: { modeA = $0 == 1 }))
+        }
+        .cardStyle()
+    }
+
+    // MARK: Status
+    private var statusStrip: some View {
+        HStack(spacing: 7) {
+            switch ble.applyState {
+            case .idle: EmptyView()
+            case .pending:
+                Image(systemName: "circle.fill").font(.system(size: 9)).foregroundColor(T.amber)
+                Text("Unsaved changes — tap Apply").font(.system(size: 13)).foregroundColor(T.amber)
+            case .applying:
+                ProgressView().scaleEffect(0.7).tint(T.amber)
+                Text(ble.applyDetail).font(.system(size: 13)).foregroundColor(T.amber)
+            case .verified:
+                Image(systemName: "checkmark.circle.fill").font(.system(size: 15)).foregroundColor(T.green)
+                Text("Applied & verified · \(cut) cyl · Mode \(modeA ? "A" : "B")").font(.system(size: 13)).foregroundColor(T.green)
+            case .mismatch:
+                Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 14)).foregroundColor(T.red)
+                Text("Readback mismatch — retry").font(.system(size: 13)).foregroundColor(T.red)
+            case .noReply:
+                Image(systemName: "xmark.circle.fill").font(.system(size: 14)).foregroundColor(T.red)
+                Text("No reply from ECU").font(.system(size: 13)).foregroundColor(T.red)
+            }
+            Spacer()
+        }
+        .frame(minHeight: 20)
+        .frame(maxWidth: .infinity)
+        .multilineTextAlignment(.center)
+        .padding(.top, 2)
+    }
+
+    private var applyButton: some View {
+        Button {
+            ble.applyConfig(enable: enable, cut: cut, modeA: modeA)
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "bolt.fill").font(.system(size: 18))
+                Text("Apply to ECU").font(.system(size: 16, weight: .bold))
+            }
+            .frame(maxWidth: .infinity).padding(.vertical, 15)
+            .background(T.amber).foregroundColor(T.bg)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
         }
     }
 
-    // MARK: Log
-    private var logSection: some View {
-        Section(header: HStack { Text("Log"); Spacer(); Button("Clear") { ble.clearLog() } }) {
+    private var readButton: some View {
+        Button { ble.readConfig() } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "arrow.clockwise").font(.system(size: 16)).foregroundColor(T.amber)
+                Text("Read back").font(.system(size: 14)).foregroundColor(T.greyLt)
+            }
+            .frame(maxWidth: .infinity).padding(.vertical, 12)
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(T.line, lineWidth: 1))
+        }
+    }
+
+    // MARK: Advanced
+    private var advancedRow: some View {
+        Button { withAnimation { showAdvanced.toggle() } } label: {
+            HStack {
+                Text("Advanced · raw frames, log").font(.system(size: 13)).foregroundColor(Color(hex: 0x85878C))
+                Spacer()
+                Image(systemName: showAdvanced ? "chevron.down" : "chevron.right").font(.system(size: 13)).foregroundColor(Color(hex: 0x85878C))
+            }
+            .padding(.vertical, 6).padding(.horizontal, 4)
+        }
+    }
+
+    private var advancedBody: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                TextField("40 01 19 00 …", text: $rawCmd)
+                    .font(.system(size: 13, design: .monospaced))
+                    .textInputAutocapitalization(.characters).autocorrectionDisabled()
+                    .foregroundColor(.white)
+                Button("Send") { ble.sendRaw(rawCmd); rawCmd = "" }
+                    .font(.system(size: 14)).foregroundColor(T.amber).disabled(!ble.isConnected)
+            }
+            .padding(10)
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(T.line, lineWidth: 1))
+
             ScrollView {
                 VStack(alignment: .leading, spacing: 2) {
-                    ForEach(Array(ble.log.suffix(60).enumerated()), id: \.offset) { _, line in
-                        Text(line).font(.system(size: 11, design: .monospaced))
+                    ForEach(Array(ble.log.suffix(80).enumerated()), id: \.offset) { _, l in
+                        Text(l).font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(T.greyLt)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
             }
-            .frame(height: 180)
+            .frame(height: 200)
+            .padding(8)
+            .background(Color(hex: 0x151517))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+
+            Button("Clear log") { ble.clearLog() }.font(.system(size: 13)).foregroundColor(T.amber)
         }
+        .cardStyle()
+    }
+}
+
+private extension View {
+    func cardStyle() -> some View {
+        self.padding(15)
+            .background(T.card)
+            .overlay(RoundedRectangle(cornerRadius: 14).stroke(T.cardBorder, lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 14))
     }
 }
