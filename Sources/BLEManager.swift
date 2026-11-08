@@ -44,6 +44,7 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
 
     // MARK: Apply/verify feedback
     @Published var connectedName = ""
+    @Published var vin = ""
     @Published var applyState: ApplyState = .idle
     @Published var applyDetail = "Applying to ECU…"
     private var expected: (en: Bool, cut: Int, modeA: Bool)?
@@ -108,6 +109,7 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         isConnected = true
         mbitoMode = true
         connectedName = "V2502615C3"
+        vin = "WDD2050461A123456"
         applyState = .verified
         logLine("Preview mode — demo connection")
         #endif
@@ -229,6 +231,12 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     func sendMbitoReadback() {
         let frame = Self.buildMbitoV2(senderId: 0x7E0, receiverId: 0x7E8, payload: [0x01, 0xA1])
         writeMbito(frame)
+    }
+
+    /// Read the car VIN: UDS ReadDataByIdentifier DID F190 → 62 F1 90 + 17 ASCII chars.
+    func readVIN() {
+        guard mbitoChar != nil else { return }
+        writeMbito(Self.buildMbitoV2(senderId: 0x7E0, receiverId: 0x7E8, payload: [0x22, 0xF1, 0x90]))
     }
 
     // MARK: Headlight animation engine ------------------------------------------------
@@ -473,7 +481,7 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         writeChar = nil; notifyChar = nil
         lightTimer?.invalidate(); lightTimer = nil; currentStyle = nil; activeLightStyle = nil
         mbitoChar = nil; mbitoMode = false
-        connectedName = ""; applyState = .idle; awaitingVerify = false
+        connectedName = ""; vin = ""; applyState = .idle; awaitingVerify = false
         status = "Disconnected"
         // Keep trying to reconnect to the dongle.
         startScan()
@@ -499,9 +507,13 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
                     status = "Connected (ESP32 0xFF01)"
                     logLine("ESP32 dongle detected — subscribing to 0xFF01")
                     // Replay the app's connect handshake once the CCCD write settles.
+                    vin = ""
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
                         self?.logLine("ESP32 init handshake (04/01)")
                         self?.mbitoInit()
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+                        self?.readVIN()
                     }
                 }
                 continue
@@ -536,7 +548,14 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
             }
             // Verify: a C0 response carries the UDS reply command starting at offset 25.
             if bytes.count >= 26, bytes[0] == 0xC0 {
-                resolveVerify(Array(bytes[25...]))
+                let cmd = Array(bytes[25...])
+                resolveVerify(cmd)
+                // VIN reply: 62 F1 90 <17 ASCII chars>
+                if cmd.count >= 4, cmd[0] == 0x62, cmd[1] == 0xF1, cmd[2] == 0x90 {
+                    let ascii = cmd[3...].prefix(17).map { (32...126).contains($0) ? Character(UnicodeScalar($0)) : " " }
+                    let v = String(ascii).trimmingCharacters(in: .whitespaces)
+                    if v.count >= 11 { vin = v; logLine("VIN ← \(v)") }
+                }
             }
             return
         }

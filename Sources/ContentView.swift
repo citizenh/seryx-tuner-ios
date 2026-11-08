@@ -140,7 +140,11 @@ struct DongleView: View {
                 VStack(alignment: .leading, spacing: 13) {
                     AppHeader()
                     statusCard
-                    scanButton
+                    if ble.isConnected {
+                        vinCard.transition(.opacity.combined(with: .move(edge: .top)))
+                    } else {
+                        scanButton
+                    }
                     if !ble.discovered.isEmpty {
                         deviceList.transition(.opacity.combined(with: .move(edge: .top)))
                     }
@@ -173,6 +177,25 @@ struct DongleView: View {
             }
         }
         .cardStyle()
+    }
+
+    private var vinCard: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "car.fill").font(.system(size: 20)).foregroundColor(T.amber)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("VIN").font(.system(size: 12)).foregroundColor(T.grey)
+                Text(ble.vin.isEmpty ? "Reading…" : ble.vin)
+                    .font(.system(size: 15, weight: .medium, design: .monospaced))
+                    .foregroundColor(ble.vin.isEmpty ? T.grey : .white)
+            }
+            Spacer()
+            Button { ble.readVIN() } label: {
+                Image(systemName: "arrow.clockwise").font(.system(size: 15)).foregroundColor(T.amber)
+            }
+            .buttonStyle(PressStyle())
+        }
+        .cardStyle()
+        .animation(.spring(response: 0.4, dampingFraction: 0.8), value: ble.vin)
     }
 
     private var scanButton: some View {
