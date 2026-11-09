@@ -102,10 +102,15 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
 
     // Known ELM327 BLE service/characteristic families (adapter-dependent).
     // We don't hard-filter on scan; on connect we pick any char that is writable+notifiable.
-    private let knownServiceUUIDs: [CBUUID] = [
+    // Advertised service UUIDs used by compatible adapters: 00FF = mbito/ESP32,
+    // the rest are the common BLE ELM327 families (Vgate iCar Pro = FFE0, others FFF0/18F0/FFE5).
+    private let knownServiceUUIDs: Set<CBUUID> = [
+        CBUUID(string: "00FF"),
         CBUUID(string: "FFF0"), CBUUID(string: "FFE0"),
         CBUUID(string: "18F0"), CBUUID(string: "FFE5")
     ]
+    // Name hints for adapters that don't put their service UUID in the advertising packet.
+    private let adapterNameHints = ["icar", "vgate", "vlink", "obd", "elm", "v250", "viecar", "konnwei"]
 
     // MARK: Command queue (ELM327 is a serial, prompt-based device)
     private var queue: [String] = []
@@ -146,10 +151,10 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         discovered.removeAll()
         isScanning = true
         status = "Scanning…"
-        // Match mbito: filter by the dongle's advertised service 0x00FF, so only
-        // compatible dongles appear (not every BLE device around). iOS only returns
-        // peripherals advertising this service UUID.
-        central.scanForPeripherals(withServices: [CBUUID(string: "00FF")], options: nil)
+        // Scan broadly, then filter in didDiscover to compatible adapters (mbito + ELM327)
+        // by advertised service OR name. Filtering by service on scan would miss ELM
+        // adapters like the iCar Pro that don't advertise their service in the adv packet.
+        central.scanForPeripherals(withServices: nil, options: nil)
         DispatchQueue.main.asyncAfter(deadline: .now() + 12) { [weak self] in self?.stopScan() }
     }
     func stopScan() {
@@ -252,8 +257,22 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
 
     /// Read the car VIN: UDS ReadDataByIdentifier DID F190 → 62 F1 90 + 17 ASCII chars.
     func readVIN() {
-        guard mbitoChar != nil else { return }
-        writeMbito(Self.buildMbitoV2(senderId: 0x7E0, receiverId: 0x7E8, payload: [0x22, 0xF1, 0x90]))
+        if mbitoChar != nil {
+            writeMbito(Self.buildMbitoV2(senderId: 0x7E0, receiverId: 0x7E8, payload: [0x22, 0xF1, 0x90]))
+            return
+        }
+        // ELM327: ATCAF1 reassembles the ISO-TP multiframe, so the reply hex contains 62 F1 90 + VIN.
+        guard notifyChar != nil else { return }
+        enqueueWithResponse("22F190") { [weak self] resp in
+            guard let self = self else { return }
+            let b = Self.hexToBytes(resp)
+            if let i = b.firstIndex(where: { idx in idx == 0x62 }),
+               i + 2 < b.count, b[i+1] == 0xF1, b[i+2] == 0x90 {
+                let ascii = b[(i+3)...].prefix(17).map { (32...126).contains($0) ? Character(UnicodeScalar($0)) : " " }
+                let v = String(ascii).trimmingCharacters(in: .whitespaces)
+                if v.count >= 11 { self.vin = v; self.logLine("VIN ← \(v)") }
+            }
+        }
     }
 
     // MARK: DTC scan ------------------------------------------------------------------
@@ -531,6 +550,13 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     }
     func centralManager(_ central: CBCentralManager, didDiscover p: CBPeripheral,
                         advertisementData: [String: Any], rssi RSSI: NSNumber) {
+        // Only surface compatible adapters: those advertising a known service, or whose
+        // name looks like an OBD adapter. Keeps phones/watches/etc. out of the list.
+        let advServices = (advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID]) ?? []
+        let name = (p.name ?? "").lowercased()
+        let looksCompatible = advServices.contains(where: { knownServiceUUIDs.contains($0) })
+            || adapterNameHints.contains(where: { name.contains($0) })
+        guard looksCompatible else { return }
         if !discovered.contains(where: { $0.identifier == p.identifier }) {
             discovered.append(p)
             logLine("Found: \(p.name ?? "Unknown") (\(RSSI))")
@@ -604,7 +630,9 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
             applyState = .idle
             status = "Connected"
             logLine("Connected – initialising adapter")
+            vin = ""
             initAdapter()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.readVIN() }
         }
     }
     func peripheral(_ p: CBPeripheral, didUpdateValueFor c: CBCharacteristic, error: Error?) {

@@ -165,7 +165,7 @@ struct DongleView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(ble.isConnected ? (ble.connectedName.isEmpty ? targetDongle : ble.connectedName) : (ble.isScanning ? "Scanning…" : "Not connected"))
                     .font(.system(size: 16, weight: .medium)).foregroundColor(.white)
-                Text(ble.isConnected ? "ESP32 dongle · ready" : ble.status)
+                Text(ble.isConnected ? "\(ble.mbitoMode ? "ESP32 dongle" : "ELM327 adapter") · ready" : ble.status)
                     .font(.system(size: 12)).foregroundColor(T.grey)
             }
             Spacer()
@@ -229,6 +229,11 @@ struct DongleView: View {
                             Text("Your dongle").font(.system(size: 11, weight: .medium))
                                 .padding(.horizontal, 7).padding(.vertical, 2)
                                 .background(T.amber.opacity(0.18)).foregroundColor(T.amber)
+                                .clipShape(Capsule())
+                        } else {
+                            Text("Compatible").font(.system(size: 11, weight: .medium))
+                                .padding(.horizontal, 7).padding(.vertical, 2)
+                                .background(T.grey.opacity(0.14)).foregroundColor(T.grey)
                                 .clipShape(Capsule())
                         }
                         Spacer()
@@ -300,7 +305,7 @@ struct TuneView: View {
             Image(systemName: "antenna.radiowaves.left.and.right.slash")
                 .font(.system(size: 34)).foregroundColor(T.grey)
             Text("Connect your dongle").font(.system(size: 16, weight: .medium)).foregroundColor(.white)
-            Text("Open the Dongle tab to connect to \(targetDongle).")
+            Text("Open the Dongle tab to connect your adapter.")
                 .font(.system(size: 13)).foregroundColor(T.grey).multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity).padding(.vertical, 60)

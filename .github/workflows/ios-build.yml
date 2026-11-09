@@ -37,39 +37,11 @@ jobs:
           cd build && zip -qr SeryxTuner-unsigned.ipa Payload
           ls -la build || true
 
-      - name: Render SwiftUI preview in a simulator
-        continue-on-error: true
-        run: |
-          set -e
-          xcodebuild \
-            -project SeryxTuner.xcodeproj \
-            -scheme SeryxTuner \
-            -configuration Debug \
-            -sdk iphonesimulator \
-            -destination 'generic/platform=iOS Simulator' \
-            -derivedDataPath simdd \
-            build CODE_SIGNING_ALLOWED=NO
-          APP=$(find simdd -name 'SeryxTuner.app' -type d | head -1)
-          echo "app: $APP"
-          RT=$(xcrun simctl list runtimes | grep -oE 'com.apple.CoreSimulator.SimRuntime.iOS[^ )]*' | tail -1)
-          DT=$(xcrun simctl list devicetypes | grep -oE 'com.apple.CoreSimulator.SimDeviceType.iPhone-1[5-6]' | tail -1)
-          echo "runtime=$RT devicetype=$DT"
-          UDID=$(xcrun simctl create preview "$DT" "$RT")
-          xcrun simctl boot "$UDID"
-          xcrun simctl bootstatus "$UDID" -b
-          xcrun simctl install "$UDID" "$APP"
-          xcrun simctl launch "$UDID" gg.seryx.tuner
-          sleep 6
-          xcrun simctl io "$UDID" screenshot build/preview.png
-          ls -la build/preview.png
-
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: SeryxTuner-build
-          path: |
-            build/SeryxTuner-unsigned.ipa
-            build/preview.png
+          path: build/SeryxTuner-unsigned.ipa
           if-no-files-found: warn
 
       - name: Publish to public release
@@ -77,6 +49,4 @@ jobs:
         with:
           tag_name: dev-latest
           name: Latest dev build
-          files: |
-            build/SeryxTuner-unsigned.ipa
-            build/preview.png
+          files: build/SeryxTuner-unsigned.ipa
