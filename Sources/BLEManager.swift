@@ -365,15 +365,15 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         armCodingTimeout()
     }
 
-    private func sendEsp(_ uds: [UInt8], responseLen: UInt16 = 64) {
+    private func sendEsp(_ uds: [UInt8], responseLen: UInt16 = 64, timeout: UInt16 = 500) {
         writeMbito(Self.buildMbitoV2(senderId: esp205.tx, receiverId: esp205.rx,
-                                     payload: uds, responseLen: responseLen))
+                                     payload: uds, timeout: timeout, responseLen: responseLen))
     }
 
     private func armCodingTimeout() {
         codingToken += 1
         let tok = codingToken
-        DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 9) { [weak self] in
             guard let self = self, tok == self.codingToken, self.codingStep != .idle else { return }
             self.logLine("ESP205 coding: timeout at \(self.codingStep)")
             self.codingStep = .idle
@@ -441,7 +441,9 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
             }
             codingStep = .write
             codingDetail = "Writing coding…"
-            sendEsp(DynamicSelectLastMode.writeBlock + newBlock)   // 2E 2201 <81 bytes>
+            // Coding write commits to EEPROM — give the ECU up to 3s to reply (6E),
+            // not the default 500ms (a short window is what timed out on the first on-car run).
+            sendEsp(DynamicSelectLastMode.writeBlock + newBlock, responseLen: 32, timeout: 3000)  // 2E 2201 <81 bytes>
             armCodingTimeout()
 
         case .write:                                  // expect 6E 22 01
