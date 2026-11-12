@@ -267,6 +267,7 @@ struct TuneView: View {
     @State private var modeA = false
     @State private var showAdvanced = false
     @State private var rawCmd = ""
+    @State private var lastMode = false
 
     var body: some View {
         ZStack {
@@ -280,6 +281,7 @@ struct TuneView: View {
                             statusStrip
                             applyButton
                             readButton
+                            dynamicSelectCard
                             advancedRow
                             if showAdvanced {
                                 advancedBody.transition(.opacity.combined(with: .move(edge: .top)))
@@ -298,6 +300,66 @@ struct TuneView: View {
         .onChange(of: cut) { _ in ble.markPending() }
         .onChange(of: modeA) { _ in ble.markPending() }
         .onChange(of: enable) { _ in ble.markPending() }
+        .onChange(of: ble.lastModeOn) { v in if let v = v { lastMode = v } }
+    }
+
+    // MARK: Dynamic Select "Last Mode" (ESP205 variant coding)
+    private var dynamicSelectCard: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 10) {
+                Image(systemName: "dial.medium.fill").font(.system(size: 20)).foregroundColor(T.amber)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Dynamic Select").font(.system(size: 16, weight: .medium)).foregroundColor(.white)
+                    Text("Remember last drive mode (4h)").font(.system(size: 12)).foregroundColor(T.grey)
+                }
+                Spacer()
+                Toggle("", isOn: $lastMode).labelsHidden().tint(T.amber)
+            }
+            .padding(.bottom, 12)
+
+            // coding status
+            HStack(spacing: 7) {
+                switch ble.codingState {
+                case .applying:
+                    ProgressView().scaleEffect(0.7).tint(T.amber)
+                    Text(ble.codingDetail).font(.system(size: 12)).foregroundColor(T.amber)
+                case .verified:
+                    Image(systemName: "checkmark.circle.fill").font(.system(size: 14)).foregroundColor(T.green)
+                    Text(ble.lastModeOn == true ? "Last-Mode 4h active" : "Set to default (off)")
+                        .font(.system(size: 12)).foregroundColor(T.green)
+                case .mismatch:
+                    Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 13)).foregroundColor(T.red)
+                    Text("Coding rejected — retry").font(.system(size: 12)).foregroundColor(T.red)
+                case .noReply:
+                    Image(systemName: "xmark.circle.fill").font(.system(size: 13)).foregroundColor(T.red)
+                    Text("No reply from ESP205").font(.system(size: 12)).foregroundColor(T.red)
+                default:
+                    Image(systemName: "info.circle").font(.system(size: 12)).foregroundColor(T.grey)
+                    Text("ESP205 · needs SecurityAccess").font(.system(size: 12)).foregroundColor(T.grey)
+                }
+                Spacer()
+            }
+            .frame(minHeight: 18).padding(.bottom, 12)
+
+            HStack(spacing: 10) {
+                Button { ble.codeDynamicSelectLastMode(enable: lastMode) } label: {
+                    Text("Apply coding").font(.system(size: 14, weight: .bold))
+                        .frame(maxWidth: .infinity).padding(.vertical, 11)
+                        .background(T.amber).foregroundColor(T.bg)
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                }
+                .buttonStyle(PressStyle())
+                .disabled(ble.codingState == .applying)
+                Button { ble.readDynamicSelectLastMode() } label: {
+                    Image(systemName: "arrow.clockwise").font(.system(size: 15)).foregroundColor(T.amber)
+                        .frame(width: 44, height: 42)
+                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(T.line, lineWidth: 1))
+                }
+                .buttonStyle(PressStyle())
+                .disabled(ble.codingState == .applying)
+            }
+        }
+        .cardStyle()
     }
 
     private var notConnected: some View {

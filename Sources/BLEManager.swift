@@ -64,6 +64,19 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
     private var verifyToken = 0
     private let targetName = "V2502615C3"   // the mbito dongle always advertises this
 
+    // MARK: ESP205 Dynamic Select "Last Mode" variant coding
+    // Multi-step UDS session on ESP205 (tester 0x7E2 / ECU 0x7EA):
+    // 10 03 → 27 0B (seed) → 27 0C (key) → 22 2201 (read 81B) → 2E 2201 (write) → 11 03.
+    enum CodingStep { case idle, session, seed, key, read, write, reset }
+    @Published var codingState: ApplyState = .idle
+    @Published var codingDetail = ""
+    @Published var lastModeOn: Bool? = nil        // current read-back state (nil = unknown)
+    private let esp205 = (tx: UInt32(0x7E2), rx: UInt32(0x7EA))
+    private var codingStep: CodingStep = .idle
+    private var codingEnable = false
+    private var codingReadOnly = false
+    private var codingToken = 0
+
     // MARK: Headlight animations (UDS 2F zone control to front headlamps)
     @Published var activeLightStyle: String? = nil
     @Published var lightDID: UInt16 = 0x0008     // swap to 0xD008 / 0x0011 if lamps don't respond
@@ -128,6 +141,7 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         connectedName = "V2502615C3"
         vin = "WDD2050461A123456"
         applyState = .verified
+        lastModeOn = false
         dtcScanned = ["Engine", "Transmission", "Front SAM", "Cluster"]
         dtcResults = [
             DTCItem(ecu: "Engine", code: "9C5400", status: 0x09),
@@ -327,6 +341,124 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
             let code = String(format: "%02X%02X%02X", a, b, c)
             dtcResults.append(DTCItem(ecu: name, code: code, status: st))
             i += 4
+        }
+    }
+
+    // MARK: ESP205 Dynamic Select Last Mode coding -----------------------------------
+
+    /// Read the current Last-Mode coding state (no write).
+    func readDynamicSelectLastMode() { beginCoding(enable: false, readOnly: true) }
+
+    /// Apply Last-Mode on/off. Full unlock + read-modify-write of bytes 77..80 only.
+    func codeDynamicSelectLastMode(enable: Bool) { beginCoding(enable: enable, readOnly: false) }
+
+    private func beginCoding(enable: Bool, readOnly: Bool) {
+        guard mbitoChar != nil else { codingState = .noReply; return }
+        guard codingStep == .idle else { return }   // one session at a time
+        codingEnable = enable
+        codingReadOnly = readOnly
+        codingState = .applying
+        codingDetail = readOnly ? "Reading coding…" : "Entering session…"
+        codingStep = .session
+        logLine("ESP205 coding: \(readOnly ? "read" : (enable ? "enable" : "disable")) Last-Mode")
+        sendEsp([0x10, 0x03])                        // extended session
+        armCodingTimeout()
+    }
+
+    private func sendEsp(_ uds: [UInt8], responseLen: UInt16 = 64) {
+        writeMbito(Self.buildMbitoV2(senderId: esp205.tx, receiverId: esp205.rx,
+                                     payload: uds, responseLen: responseLen))
+    }
+
+    private func armCodingTimeout() {
+        codingToken += 1
+        let tok = codingToken
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
+            guard let self = self, tok == self.codingToken, self.codingStep != .idle else { return }
+            self.logLine("ESP205 coding: timeout at \(self.codingStep)")
+            self.codingStep = .idle
+            self.codingState = .noReply
+        }
+    }
+
+    private func failCoding(_ why: String) {
+        logLine("ESP205 coding failed: \(why)")
+        codingStep = .idle
+        codingState = .mismatch
+    }
+
+    /// Drive the coding state machine from an ESP205 UDS reply (`cmd` = UDS bytes).
+    private func handleCodingResponse(_ cmd: [UInt8]) {
+        guard codingStep != .idle, let sid = cmd.first else { return }
+        if sid == 0x7F {                              // negative response
+            failCoding("NRC \(cmd.count > 2 ? String(format: "%02X", cmd[2]) : "?") at \(codingStep)")
+            return
+        }
+        codingToken += 1                              // cancel the pending timeout; we re-arm per step
+        switch codingStep {
+        case .session:                                // expect 50 03
+            codingStep = .seed
+            codingDetail = "Unlocking…"
+            sendEsp([0x27, ESP205.accessLevel])       // 27 0B request seed
+            armCodingTimeout()
+
+        case .seed:                                   // expect 67 0B <8 seed>
+            guard cmd.count >= 10, cmd[0] == 0x67 else { failCoding("bad seed reply"); return }
+            let seed = Array(cmd[2..<10])
+            let key = ESP205.key(fromSeed: seed)
+            logLine("ESP205 seed \(seed.map{String(format:"%02X",$0)}.joined()) → key \(key.map{String(format:"%02X",$0)}.joined())")
+            codingStep = .key
+            sendEsp([0x27, ESP205.accessLevel + 1] + key)   // 27 0C <key>
+            armCodingTimeout()
+
+        case .key:                                    // expect 67 0C
+            guard cmd[0] == 0x67 else { failCoding("key rejected"); return }
+            codingStep = .read
+            codingDetail = "Reading coding…"
+            sendEsp(DynamicSelectLastMode.readBlock, responseLen: 96)  // 22 2201
+            armCodingTimeout()
+
+        case .read:                                   // expect 62 22 01 <81 bytes>
+            guard cmd.count >= 84, cmd[0] == 0x62, cmd[1] == 0x22, cmd[2] == 0x01 else {
+                failCoding("bad read reply (\(cmd.count)B)"); return
+            }
+            let block = Array(cmd[3..<84])            // 81-byte coding block
+            let cur = Array(block[DynamicSelectLastMode.fieldOffset..<DynamicSelectLastMode.fieldOffset+4])
+            let isOn = (cur == DynamicSelectLastMode.valueOn)
+            lastModeOn = isOn
+            logLine("ESP205 bytes 77..80 = \(cur.map{String(format:"%02X",$0)}.joined()) (\(isOn ? "Last-Mode 4h" : "off"))")
+            if codingReadOnly {                       // read-only: done
+                codingStep = .idle
+                codingState = .verified
+                return
+            }
+            let newBlock = DynamicSelectLastMode.apply(block: block, enable: codingEnable)
+            if newBlock == block {                    // already in desired state
+                codingStep = .idle
+                codingState = .verified
+                lastModeOn = codingEnable
+                return
+            }
+            codingStep = .write
+            codingDetail = "Writing coding…"
+            sendEsp(DynamicSelectLastMode.writeBlock + newBlock)   // 2E 2201 <81 bytes>
+            armCodingTimeout()
+
+        case .write:                                  // expect 6E 22 01
+            guard cmd[0] == 0x6E else { failCoding("write rejected"); return }
+            codingStep = .reset
+            codingDetail = "Resetting ECU…"
+            sendEsp([0x11, 0x03])                      // soft reset
+            armCodingTimeout()
+
+        case .reset:                                  // expect 51 03
+            codingStep = .idle
+            codingState = .verified
+            lastModeOn = codingEnable
+            logLine("ESP205 Last-Mode \(codingEnable ? "enabled" : "disabled") ✓")
+
+        case .idle:
+            break
         }
     }
 
@@ -649,6 +781,12 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
             // Verify: a C0 response carries the UDS reply command starting at offset 25.
             if bytes.count >= 26, bytes[0] == 0xC0 {
                 let cmd = Array(bytes[25...])
+                let replySender = UInt32(bytes[7]) | UInt32(bytes[8]) << 8
+                    | UInt32(bytes[9]) << 16 | UInt32(bytes[10]) << 24
+                // ESP205 variant-coding session takes priority while active.
+                if codingStep != .idle, replySender == esp205.tx {
+                    handleCodingResponse(cmd); return
+                }
                 resolveVerify(cmd)
                 // VIN reply: 62 F1 90 <17 ASCII chars>
                 if cmd.count >= 4, cmd[0] == 0x62, cmd[1] == 0xF1, cmd[2] == 0x90 {
