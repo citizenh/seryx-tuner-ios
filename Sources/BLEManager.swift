@@ -365,9 +365,16 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         armCodingTimeout()
     }
 
-    private func sendEsp(_ uds: [UInt8], responseLen: UInt16 = 64, timeout: UInt16 = 500) {
-        writeMbito(Self.buildMbitoV2(senderId: esp205.tx, receiverId: esp205.rx,
-                                     payload: uds, timeout: timeout, responseLen: responseLen))
+    private func sendEsp(_ uds: [UInt8], responseLen: UInt16 = 64, timeout: UInt16 = 500,
+                         full: Bool = false) {
+        // Long commands (coding write) must use the FullScript 0x33 multi-frame path;
+        // short ones use the proven V2 0x40 single frame.
+        let frame = (full || uds.count > 12)
+            ? Self.buildMbitoFull(senderId: esp205.tx, receiverId: esp205.rx,
+                                  payload: uds, timeout: timeout, responseLen: responseLen)
+            : Self.buildMbitoV2(senderId: esp205.tx, receiverId: esp205.rx,
+                                payload: uds, timeout: timeout, responseLen: responseLen)
+        writeMbito(frame)
     }
 
     private func armCodingTimeout() {
@@ -441,9 +448,9 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
             }
             codingStep = .write
             codingDetail = "Writing coding…"
-            // Coding write commits to EEPROM — give the ECU up to 3s to reply (6E),
-            // not the default 500ms (a short window is what timed out on the first on-car run).
-            sendEsp(DynamicSelectLastMode.writeBlock + newBlock, responseLen: 32, timeout: 3000)  // 2E 2201 <81 bytes>
+            // 84-byte write → FullScript 0x33 multi-frame path (V2 0x40 is length-capped on
+            // the dongle, which silently dropped the first on-car attempt). 3s EEPROM window.
+            sendEsp(DynamicSelectLastMode.writeBlock + newBlock, responseLen: 32, timeout: 3000, full: true)  // 2E 2201 <81 bytes>
             armCodingTimeout()
 
         case .write:                                  // expect 6E 22 01
@@ -613,6 +620,32 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
         for (i, b) in payload.enumerated() { u[21 + i] = b }
         // outer BLE header: 40 <seq> <len LE>
         var f: [UInt8] = [0x40, seq, UInt8(u.count & 0xFF), UInt8((u.count >> 8) & 0xFF)]
+        f.append(contentsOf: u)
+        return f
+    }
+
+    /// Build a FullScript (0x33) request — mbito's multi-frame path for long commands.
+    /// The V2 single frame (0x40) is length-capped on the dongle, so an 81-byte coding
+    /// write must go via FullScript: same 21-byte UDS struct + payload, but the outer
+    /// header announces frameCount so the dongle buffers the whole command before TX.
+    /// Outer header: [0x33, frameCount, structLen LE] — best reconstruction from the mbito
+    /// bundle (makeRequest/getFramesCount=floor(len/16)); iterating on-car from the raw log.
+    static func buildMbitoFull(senderId: UInt32, receiverId: UInt32, payload: [UInt8],
+                               timeout: UInt16 = 3000, responseLen: UInt16 = 64) -> [UInt8] {
+        var u = [UInt8](repeating: 0, count: 21 + payload.count)
+        func le32(_ v: UInt32, _ at: Int) {
+            u[at] = UInt8(v & 0xFF); u[at+1] = UInt8((v >> 8) & 0xFF)
+            u[at+2] = UInt8((v >> 16) & 0xFF); u[at+3] = UInt8((v >> 24) & 0xFF)
+        }
+        func le16(_ v: UInt16, _ at: Int) { u[at] = UInt8(v & 0xFF); u[at+1] = UInt8((v >> 8) & 0xFF) }
+        u[0] = 0x00; u[1] = 0x00; u[2] = 0xFF
+        le32(senderId, 3); le32(receiverId, 7)
+        le16(timeout, 11); le16(0, 13); le16(responseLen, 15)
+        le16(UInt16(payload.count), 17); le16(0, 19)
+        for (i, b) in payload.enumerated() { u[21 + i] = b }
+        let frameCount = (u.count + 15) / 16                         // ceil(len/16)
+        var f: [UInt8] = [0x33, UInt8(frameCount & 0xFF),
+                          UInt8(u.count & 0xFF), UInt8((u.count >> 8) & 0xFF)]
         f.append(contentsOf: u)
         return f
     }
