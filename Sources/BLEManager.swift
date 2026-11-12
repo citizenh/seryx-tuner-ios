@@ -367,9 +367,10 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
 
     private func sendEsp(_ uds: [UInt8], responseLen: UInt16 = 64, timeout: UInt16 = 500,
                          full: Bool = false) {
-        // Long commands (coding write) must use the FullScript 0x33 multi-frame path;
-        // short ones use the proven V2 0x40 single frame.
-        let frame = (full || uds.count > 12)
+        // Default to the proven V2 0x40 path for every length — writeMbito now chunks the
+        // BLE packet so a long command (the 84-byte coding write) is delivered intact.
+        // `full` forces the FullScript 0x33 path only if we need it as a fallback.
+        let frame = full
             ? Self.buildMbitoFull(senderId: esp205.tx, receiverId: esp205.rx,
                                   payload: uds, timeout: timeout, responseLen: responseLen)
             : Self.buildMbitoV2(senderId: esp205.tx, receiverId: esp205.rx,
@@ -448,9 +449,9 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
             }
             codingStep = .write
             codingDetail = "Writing coding…"
-            // 84-byte write → FullScript 0x33 multi-frame path (V2 0x40 is length-capped on
-            // the dongle, which silently dropped the first on-car attempt). 3s EEPROM window.
-            sendEsp(DynamicSelectLastMode.writeBlock + newBlock, responseLen: 32, timeout: 3000, full: true)  // 2E 2201 <81 bytes>
+            // V2 0x40 path (the dongle acknowledges it); the earlier failure was BLE-MTU
+            // truncation of the 109-byte frame, now fixed by chunking in writeMbito. 3s EEPROM window.
+            sendEsp(DynamicSelectLastMode.writeBlock + newBlock, responseLen: 32, timeout: 3000)  // 2E 2201 <81 bytes>
             armCodingTimeout()
 
         case .write:                                  // expect 6E 22 01
@@ -585,12 +586,30 @@ final class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CB
 
     private func writeMbito(_ bytes: [UInt8]) {
         guard let p = peripheral, let c = mbitoChar else { logLine("ESP32: not connected to 0xFF01"); return }
-        let data = Data(bytes)
         let type: CBCharacteristicWriteType =
             c.properties.contains(.writeWithoutResponse) ? .withoutResponse : .withResponse
+        // The dongle negotiates a small ATT MTU; a frame larger than one BLE packet (e.g. the
+        // 109-byte coding write) truncates on a single writeValue. mbito requests MTU 512 for
+        // this reason. iOS won't let us force MTU, but the dongle reassembles multiple writes
+        // via its 4-byte length header — so chunk any oversized frame into MTU-sized packets.
+        let maxLen = max(20, p.maximumWriteValueLength(for: type))
         let shown = bytes.map { String(format: "%02X", $0) }.joined(separator: " ")
-        logLine("TX → \(shown)")
-        p.writeValue(data, for: c, type: type)
+        logLine("TX → \(shown)  [\(bytes.count)B, mtu \(maxLen)]")
+        if bytes.count <= maxLen {
+            p.writeValue(Data(bytes), for: c, type: type)
+            return
+        }
+        var off = 0, idx = 0
+        while off < bytes.count {
+            let end = min(off + maxLen, bytes.count)
+            let chunk = Data(bytes[off..<end])
+            // small stagger so back-to-back writeWithoutResponse packets aren't dropped
+            DispatchQueue.main.asyncAfter(deadline: .now() + Double(idx) * 0.02) { [weak self] in
+                guard let self = self, self.mbitoChar != nil else { return }
+                p.writeValue(chunk, for: c, type: type)
+            }
+            off = end; idx += 1
+        }
     }
 
     /// mbito request frame — VERIFIED against a live HCI capture of the mbito app.
